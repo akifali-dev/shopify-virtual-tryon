@@ -1,0 +1,12 @@
+<div id="tryon-root" data-app-url="/apps/virtual-tryon">
+  <div id="tryon-app"></div>
+</div>
+<link rel="stylesheet" href="{{ 'main.css' | asset_url }}">
+<script type="module" src="{{ 'main.js' | asset_url }}?v={{ 'now' | date: '%s' }}"></script>
+
+{% schema %}
+{
+  "name": "Virtual Try-On Embed",
+  "target": "body"
+}
+{% endschema %}

@@ -1,0 +1,82 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+model Session {
+  id            String    @id @default(auto()) @map("_id") @db.ObjectId
+  sessionId     String    @unique // Shopify session ID
+  shop          String
+  state         String
+  isOnline      Boolean   @default(false)
+  scope         String?
+  expires       DateTime?
+  accessToken   String?
+  userId        BigInt?
+  firstName     String?
+  lastName      String?
+  email         String?
+  accountOwner  Boolean   @default(false)
+  locale        String?
+  collaborator  Boolean?  @default(false)
+  emailVerified Boolean?  @default(false)
+}
+
+model QRCode {
+  id               String   @id @default(auto()) @map("_id") @db.ObjectId
+  title            String
+  shop             String
+  productId        String
+  productHandle    String
+  productVariantId String
+  destination      String
+  scans            Int      @default(0)
+  createdAt        DateTime @default(now())
+}
+
+model Store {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  shop        String   @unique // myshopify domain
+  installedAt DateTime @default(now())
+  ownerEmail  String?
+  credits     Int      @default(0)
+
+  subscriptions Subscription[]
+  TryOnResult   TryOnResult[]
+}
+
+model Subscription {
+  id             String    @id @default(auto()) @map("_id") @db.ObjectId
+  shop           String
+  subscriptionId String    @unique // Shopify GID
+  planKey        String // BASIC_MONTHLY, etc.
+  quota          Int
+  credits        Int       @default(0)
+  status         String // ACTIVE, CANCELLED
+  interval       String // EVERY_30_DAYS, ANNUAL
+  lastCreditedAt DateTime?
+  updatedAt      DateTime  @updatedAt
+  Store          Store?    @relation(fields: [storeId], references: [id])
+  storeId        String?   @db.ObjectId
+}
+
+model TryOnResult {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  storeId   String   @db.ObjectId
+  store     Store    @relation(fields: [storeId], references: [id])
+  taskId    String
+  resultId  String
+  status    String
+  errorMsg  String?
+  fileUrl   String?
+  refunded  Boolean  @default(false) // whether we've returned 1 credit for this failed result
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([storeId, taskId, resultId])
+  @@index([taskId])
+}

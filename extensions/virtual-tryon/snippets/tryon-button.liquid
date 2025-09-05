@@ -1,0 +1,79 @@
+<button
+  id="tryon-button-{{ section_id }}"
+  class="tryon-button"
+  style="background:{{ button_bg_gradient | default: button_bg_color }};font-size:{{ font_size }};padding:{{ padding }};margin:{{ margin }};font-style:{{ font_style }};color:{{ button_text_color | default: '#fff' }};border:none;border-radius:{{ border_radius }};cursor:pointer;"
+  data-product-id="{{ product_id }}"
+  data-product-name="{{ product_name }}"
+  data-product-image="{{ product_image | escape }}"
+  data-default-label="{{ button_label | escape }}"
+>
+  {{ button_label }}
+</button>
+
+<style>
+  @keyframes tryon-spin { to { transform: rotate(360deg); } }
+  .tryon-spinner {
+    width: 16px; height: 16px;
+    border: 2px solid rgba(255,255,255,.5);
+    border-top-color: currentColor; border-right-color: currentColor;
+    border-radius: 50%;
+    display: inline-block; vertical-align: -2px;
+    animation: tryon-spin .8s linear infinite;
+  }
+  .tryon-button.tryon-disabled { opacity: .7; cursor: not-allowed; }
+</style>
+
+<script>
+  document.addEventListener('DOMContentLoaded', function() {
+    var btn = document.getElementById('tryon-button-{{ section_id }}');
+    if (!btn) return;
+
+    // ---- helpers
+    function setBtnGenerating(isGenerating) {
+      if (isGenerating) {
+        if (!btn.dataset.originalHtml) btn.dataset.originalHtml = btn.innerHTML;
+        btn.disabled = true;
+        btn.classList.add('tryon-disabled');
+        btn.innerHTML = '<span class="tryon-spinner" aria-hidden="true"></span>' +
+                        '<span style="margin-left:8px">Creating your try-on…</span>';
+      } else {
+        btn.disabled = false;
+        btn.classList.remove('tryon-disabled');
+        // restore original label or fallback to schema label
+        btn.innerHTML = btn.dataset.originalHtml || btn.dataset.defaultLabel || '{{ button_label | escape }}';
+      }
+    }
+
+    function readGlobalGenerating() {
+      try { return JSON.parse(localStorage.getItem('tryonGenerating') || 'false'); }
+      catch(e) { return false; }
+    }
+
+    // ---- init state
+    setBtnGenerating(readGlobalGenerating());
+
+    // ---- react to state broadcasts from the React app
+    window.addEventListener('tryon:state', function(ev) {
+      setBtnGenerating(!!(ev.detail && ev.detail.generating));
+    });
+
+    // ---- keep in sync if localStorage changes (other tabs/components)
+    window.addEventListener('storage', function(e) {
+      if (e.key === 'tryonGenerating') {
+        try { setBtnGenerating(JSON.parse(e.newValue || 'false')); } catch {}
+      }
+    });
+
+    // ---- click to open modal (only when not generating)
+    btn.addEventListener('click', function () {
+      if (btn.disabled) return; // ignore while generating
+      var detail = {
+        garmentId: btn.dataset.productId,
+        garmentImage: btn.dataset.productImage,
+        garmentName: btn.dataset.productName,
+        isNew: new Date()
+      };
+      document.dispatchEvent(new CustomEvent('openTryOnModal', { detail: detail }));
+    });
+  });
+</script>

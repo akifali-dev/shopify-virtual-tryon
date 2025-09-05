@@ -1,0 +1,21 @@
+{
+  "include": ["env.d.ts", "**/*.ts", "**/*.tsx", "tryon-ui-lib/src/extension-code/components/ui/widget-container.jsx", "tryon-ui-lib/src/extension-code/virtual-fitting-room.jsx", "tryon-ui-lib/src/extension-code/constants/pic-guide.js", "tryon-ui-lib/src/extension-code/components/ui/file-upload.jsx", "tryon-ui-lib/src/extension-code/hooks/use-toast.js", "tryon-ui-lib/src/extension-code/hooks/use-mobile.jsx"],
+  "compilerOptions": {
+    "lib": ["DOM", "DOM.Iterable", "ES2022"],
+    "strict": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "allowSyntheticDefaultImports": true,
+    "removeComments": false,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "allowJs": true,
+    "resolveJsonModule": true,
+    "jsx": "react-jsx",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "target": "ES2022",
+    "baseUrl": ".",
+    "types": ["node"]
+  }
+}
