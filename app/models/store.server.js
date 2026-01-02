@@ -9,7 +9,7 @@ export async function upsertStore(shop, ownerEmail) {
   return prisma.store.upsert({
     where: { shop },
     update: { ownerEmail },
-    create: { shop, ownerEmail },
+    create: { shop, ownerEmail, credits: 15 },
   });
 }
 
@@ -118,16 +118,16 @@ export async function addSubscriptionCredits(subscriptionId) {
     await tx.subscription.update({
       where: { subscriptionId },
       data: {
-        // credits: { increment: subscription.quota },
-        credits: { increment: subscription.quota * TRYON_TO_CREDITS },
+        credits: { increment: subscription.quota },
+        // credits: { increment: subscription.quota * TRYON_TO_CREDITS },
         lastCreditedAt: now,
       },
     });
 
     return tx.store.update({
       where: { shop: subscription.shop },
-      // data: { credits: { increment: subscription.quota } },
-      data: { credits: { increment: subscription.quota * TRYON_TO_CREDITS } },
+      data: { credits: { increment: subscription.quota } },
+      // data: { credits: { increment: subscription.quota * TRYON_TO_CREDITS } },
     });
   });
 }

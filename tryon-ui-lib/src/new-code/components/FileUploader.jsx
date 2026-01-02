@@ -58,8 +58,8 @@ const FileUploader = ({
   };
 
   return (
-    <div>
-      <h1 className=" max-w-[300px] text-sm text-[#4B4B4B]">
+    <div className="ai-file-uploader">
+      <h1 className="ai-fu-desc">
         *It is a long established fact that a reader will be distracted{" "}
       </h1>
 
@@ -68,12 +68,12 @@ const FileUploader = ({
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onClick={() => fileInputRef.current?.click()}
-        className=" border-[3px] mt-4 flex flex-col justify-center items-center border-dashed border-[#B4B4B4] rounded-3xl py-12"
+        className={`ai-fu-dropzone${isDragging ? " ai-fu-dropzone--drag" : ""}`}
       >
         <input
           type="file"
           ref={fileInputRef}
-          className="hidden"
+          className="ai-fu-input-hidden"
           accept={accept}
           onChange={(e) => {
             e.preventDefault();
@@ -83,24 +83,34 @@ const FileUploader = ({
             }
           }}
         />
-        <div className="bg-[#D9D9D9] flex justify-center items-center text-[#84888D] size-20 rounded-full">
+
+        <div className="ai-fu-icon-circle">
           <Upload />
         </div>
 
-        <h3 className=" text-base mt-3 font-normal ">Upload Your Photo</h3>
-        <p className=" text-[#4B4B4B] text-sm mt-2">
+        <h3 className="ai-fu-title">Upload Your Photo</h3>
+
+        <p className="ai-fu-note">
           Upload a clear photo of yourself to get started
         </p>
 
-        <button className=" border-2 py-2 mt-5 rounded-full text-sm px-5 border-[#CBCBCB]  flex items-center gap-2">
+        <button type="button" className="ai-fu-btn">
           <Camera size={18} />
           <span>Choose Photo</span>
         </button>
       </div>
 
-      <div className="mt-5 text-sm ">
-        Powered By <span className="font-semibold">AI FRAME</span>
+      <div className="ai-fu-powered">
+        Powered By <span className="ai-fu-strong">AI FRAME</span>
       </div>
+
+      {/* Optional: show error/progress hooks you already have (no functional changes) */}
+      {error && <div className="ai-fu-error">{error}</div>}
+      {progress > 0 && progress < 100 && (
+        <div className="ai-fu-progress" aria-valuenow={progress}>
+          <div className="ai-fu-progress-bar" style={{ width: `${progress}%` }} />
+        </div>
+      )}
     </div>
   );
 };

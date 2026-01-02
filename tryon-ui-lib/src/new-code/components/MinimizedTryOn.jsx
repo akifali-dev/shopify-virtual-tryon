@@ -11,47 +11,46 @@ export function MinimizedTryOn({
 
   return createPortal(
     <div
-      className="fixed bottom-4 right-4 cursor-pointer
-                 w-[340px] h-14 rounded-full shadow-[-5px_6px_29px_0px_#dbdbdb]
-                 border border-gray-300 bg-gray-50
-                 flex items-center !z-40"
-      // Use a huge z-index to beat theme elements
-      style={{ zIndex: 2147483647 }} // max 32-bit int
+      className="ai-mini"
+      style={{ zIndex: 2147483647 }}
       onClick={onClickOpen}
+      role="button"
+      aria-label={anySuccess ? "Open try-on result" : "Open try-on progress"}
     >
-      <div className="flex justify-between items-center w-full px-5">
-        <div className="relative h-full flex items-center gap-2">
+      <div className="ai-mini__inner">
+        <div className="ai-mini__left">
           {anySuccess ? (
-            <div className="flex justify-center items-center p-1 rounded-full bg-green-600 text-white">
+            <div className="ai-mini__status" aria-hidden="true">
               <Check size={13} />
             </div>
           ) : (
-            <Loader2 size={17} className="animate-spin" />
+            <Loader2 size={17} className="ai-mini__loader" aria-hidden="true" />
           )}
-          <div className="relative">
-            <p className="text-sm font-semibold">
-              {anySuccess ? "Try on image is ready" : stageText}
-            </p>
-          </div>
+
+          <p className="ai-mini__text">
+            {anySuccess ? "Try on image is ready" : stageText}
+          </p>
         </div>
 
-        <div className="flex gap-3 items-center">
+        <div className="ai-mini__right">
           <button
             onClick={(e) => {
               e.stopPropagation();
               onClose();
             }}
-            className="p-1.5 rounded-full hover:bg-red-100"
+            className="ai-mini__btn ai-mini__btn--close"
             aria-label="Close"
+            type="button"
           >
-            <X size={16} className="text-red-700" />
+            <X size={16} className="ai-mini__btnIcon--close" />
           </button>
-          <div className="p-1.5 rounded-full hover:bg-gray-100">
+
+          <button className="ai-mini__btn ai-mini__btn--chev" aria-hidden="true">
             <ChevronUp size={16} />
-          </div>
+          </button>
         </div>
       </div>
     </div>,
-    document.body,
+    document.body
   );
 }

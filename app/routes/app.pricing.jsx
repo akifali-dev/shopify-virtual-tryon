@@ -203,9 +203,9 @@ export default function PricingPage() {
                               name="planKey"
                               value={plan?.key}
                             />
-                              <Button variant="primary" submit>
-                                Choose {plan?.name}
-                              </Button>
+                            <Button variant="primary" submit>
+                              Choose {plan?.name}
+                            </Button>
                             {/* <Tooltip
                               content="Each try-on uses 4 credits in legacy reports."
                               dismissOnMouseOut
@@ -222,12 +222,12 @@ export default function PricingPage() {
 
             {/* Bottom note: conversion */}
             <Layout.Section>
-              <Card>
+              {/* <Card>
                 <Text alignment="center" tone="subdued">
                   Note: <strong>1 try-on = 4 credits</strong>. Usage and quotas
                   are tracked in <strong>try-ons</strong>.
                 </Text>
-              </Card>
+              </Card> */}
             </Layout.Section>
           </>
         )}

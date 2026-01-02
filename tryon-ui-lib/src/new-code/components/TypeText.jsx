@@ -45,18 +45,10 @@ const TextType = ({
 
   useEffect(() => {
     if (!startOnVisible || !containerRef.current) return;
-
     const observer = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((entry) => {
-          if (entry.isIntersecting) {
-            setIsVisible(true);
-          }
-        });
-      },
+      (entries) => entries.forEach((e) => e.isIntersecting && setIsVisible(true)),
       { threshold: 0.1 }
     );
-
     observer.observe(containerRef.current);
     return () => observer.disconnect();
   }, [startOnVisible]);
@@ -76,98 +68,62 @@ const TextType = ({
 
   useEffect(() => {
     if (!isVisible) return;
-
-    let timeout;
+    let t;
     const currentText = textArray[currentTextIndex];
-    const processedText = reverseMode
-      ? currentText.split("").reverse().join("")
-      : currentText;
+    const txt = reverseMode ? currentText.split("").reverse().join("") : currentText;
 
-    const executeTypingAnimation = () => {
+    const step = () => {
       if (isDeleting) {
-        if (displayedText === "") {
+        if (!displayedText) {
           setIsDeleting(false);
-          if (currentTextIndex === textArray.length - 1 && !loop) {
-            return;
-          }
-
-          if (onSentenceComplete) {
-            onSentenceComplete(textArray[currentTextIndex], currentTextIndex);
-          }
-
-          setCurrentTextIndex((prev) => (prev + 1) % textArray.length);
+          if (currentTextIndex === textArray.length - 1 && !loop) return;
+          onSentenceComplete?.(textArray[currentTextIndex], currentTextIndex);
+          setCurrentTextIndex((p) => (p + 1) % textArray.length);
           setCurrentCharIndex(0);
-          timeout = setTimeout(() => { }, pauseDuration);
+          t = setTimeout(() => {}, pauseDuration);
         } else {
-          timeout = setTimeout(() => {
-            setDisplayedText((prev) => prev.slice(0, -1));
-          }, deletingSpeed);
+          t = setTimeout(() => setDisplayedText((p) => p.slice(0, -1)), deletingSpeed);
         }
       } else {
-        if (currentCharIndex < processedText.length) {
-          timeout = setTimeout(
-            () => {
-              setDisplayedText(
-                (prev) => prev + processedText[currentCharIndex]
-              );
-              setCurrentCharIndex((prev) => prev + 1);
-            },
-            variableSpeed ? getRandomSpeed() : typingSpeed
-          );
+        if (currentCharIndex < txt.length) {
+          t = setTimeout(() => {
+            setDisplayedText((p) => p + txt[currentCharIndex]);
+            setCurrentCharIndex((p) => p + 1);
+          }, variableSpeed ? getRandomSpeed() : typingSpeed);
         } else if (textArray.length > 1) {
-          timeout = setTimeout(() => {
-            setIsDeleting(true);
-          }, pauseDuration);
+          t = setTimeout(() => setIsDeleting(true), pauseDuration);
         }
       }
     };
 
     if (currentCharIndex === 0 && !isDeleting && displayedText === "") {
-      timeout = setTimeout(executeTypingAnimation, initialDelay);
+      t = setTimeout(step, initialDelay);
     } else {
-      executeTypingAnimation();
+      step();
     }
 
-    return () => clearTimeout(timeout);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => clearTimeout(t);
   }, [
-    currentCharIndex,
-    displayedText,
-    isDeleting,
-    typingSpeed,
-    deletingSpeed,
-    pauseDuration,
-    textArray,
-    currentTextIndex,
-    loop,
-    initialDelay,
-    isVisible,
-    reverseMode,
-    variableSpeed,
-    onSentenceComplete,
+    currentCharIndex, displayedText, isDeleting,
+    typingSpeed, deletingSpeed, pauseDuration,
+    textArray, currentTextIndex, loop, initialDelay,
+    isVisible, reverseMode, variableSpeed, onSentenceComplete,
   ]);
 
-  const shouldHideCursor =
+  const hideCursor =
     hideCursorWhileTyping &&
     (currentCharIndex < textArray[currentTextIndex].length || isDeleting);
 
   return createElement(
     Component,
-    {
-      ref: containerRef,
-      className: `text-type ${className}`,
-      ...props,
-    },
-    <span
-      className="text-type__content text-sm font-medium"
-      style={{ color: getCurrentTextColor() }}
-    >
+    { ref: containerRef, className: `text-type ${className}`, ...props },
+    <span className="text-type__content" style={{ color: getCurrentTextColor() }}>
       {displayedText}
     </span>,
     showCursor && (
       <span
         ref={cursorRef}
-        className={`text-type__cursor text-sm font-medium ${cursorClassName} ${shouldHideCursor ? "text-type__cursor--hidden" : ""}`}
+        className={`text-type__cursor ${cursorClassName} ${hideCursor ? "text-type__cursor--hidden" : ""}`}
       >
         {cursorCharacter}
       </span>

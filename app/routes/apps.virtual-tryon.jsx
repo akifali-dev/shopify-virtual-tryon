@@ -1,3 +1,5 @@
+// app/routes/apps.virtual-tryon.jsx
+/* eslint-disable */
 import {
   json,
   unstable_parseMultipartFormData,
@@ -5,452 +7,597 @@ import {
 } from "@remix-run/node";
 import axios from "axios";
 import crypto from "crypto";
-// import prisma from "../db.server";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
-import { uploadImageFromUrl } from "../../lib/helpers";
+import { uploadBase64ImageHelper } from "../../lib/helpers";
+import { GoogleAuth } from "google-auth-library";
 
+// ====== ENV ======
 const {
   SHOPIFY_API_SECRET: SECRET,
-  SELLER_PIC_AUTH_KEY: API_KEY,
-  SELLER_PIC_REQ_UPLOAD_URL: UPLOAD_URL,
+  VERTEX_AI_PROJECT_ID,
+  VERTEX_AI_LOCATION = "us-central1",
 } = process.env;
 
-const TRYON_URL = "https://api.sellerpic.ai/v1/api/generate/tryOnApparel";
-const CHECK_URL = "https://api.sellerpic.ai/v1/api/generate";
-const SELLER_PIC_DOWNLOAD_URL = "https://api.sellerpic.ai/v1/api/download";
-const CREDIT_COST = 4;
-const UPLOAD_MAX = 10_000_000; // 10 MB
+const UPLOAD_MAX = 10_000_000;
+const CREDIT_COST = 1;
 
-// sanity-check our env
-if (!SECRET || !API_KEY || !UPLOAD_URL) {
-  throw new Error("Missing required configuration for Shopify or SellerPic");
-}
+const VTO_MODEL_ID = "virtual-try-on-preview-08-04";
+const VERTEX_ENDPOINT = `https://${VERTEX_AI_LOCATION}-aiplatform.googleapis.com/v1/projects/${VERTEX_AI_PROJECT_ID}/locations/${VERTEX_AI_LOCATION}/publishers/google/models/${VTO_MODEL_ID}:predict`;
 
-// Utility: extract file extension
-function getExt(name) {
-  const parts = name.split(".");
-  return parts.length > 1 ? parts.pop().toLowerCase() : "png";
-}
-
-// Utility: fetch remote URL as Buffer
-async function fetchAsBuffer(url) {
-  const res = await axios.get(url, { responseType: "arraybuffer" });
-  const buf = Buffer.from(res.data);
-  buf.name = `remote.${getExt(new URL(url).pathname)}`;
-  return buf;
-}
-
-// Utility: unified converter for File vs URL string
-async function toBuffer(input) {
-  if (input instanceof File) {
-    const arrayBuffer = await input.arrayBuffer();
-    const buf = Buffer.from(arrayBuffer);
-    buf.name = input.name;
-    return buf;
-  }
-  if (typeof input === "string") {
-    return fetchAsBuffer(input);
-  }
-  throw new Error("Invalid image input; must be File or URL string");
-}
-
-// Utility: upload a Buffer to SellerPic and return its key
-async function uploadToSellerPic(blob) {
-  const ext = getExt(blob.name || "file.png");
-  const { data } = await axios.get(`${UPLOAD_URL}?format=${ext}`, {
-    headers: { Authorization: `Bearer ${API_KEY}` },
-  });
-  const { imageUrl, fileKey } = data.data;
-
-  await axios.put(imageUrl, blob, {
-    headers: { "Content-Type": "application/octet-stream" },
-  });
-
-  return fileKey;
-}
-
-// Shopify proxy verification
-function verifyProxy(params) {
-  const { signature, ...rest } = params;
-  if (typeof signature !== "string") return false; // avoid crash if missing
-
-  const message = Object.entries(rest)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .reduce(
-      (acc, [key, value]) =>
-        acc + `${key}=${Array.isArray(value) ? value.join(",") : value}`,
-      "",
-    );
-
-  const digest = crypto
-    .createHmac("sha256", SECRET)
-    .update(message)
-    .digest("hex");
-
-  return crypto.timingSafeEqual(
-    Buffer.from(signature, "hex"),
-    Buffer.from(digest, "hex"),
+// Early env sanity logs (once at module load)
+if (!SECRET) console.warn("[VTO] WARN: SHOPIFY_API_SECRET is missing.");
+if (!VERTEX_AI_PROJECT_ID)
+  console.warn("[VTO] WARN: VERTEX_AI_PROJECT_ID is missing.");
+if (!VERTEX_AI_LOCATION)
+  console.warn("[VTO] WARN: VERTEX_AI_LOCATION is missing (using default).");
+if (
+  !process.env.GOOGLE_APPLICATION_CREDENTIALS &&
+  !process.env.SERVICE_ACCOUNT_JSON
+) {
+  console.warn(
+    "[VTO] WARN: No GOOGLE_APPLICATION_CREDENTIALS or SERVICE_ACCOUNT_JSON found. Are you on GCP workload identity?",
   );
 }
 
+// ====== LOG HELPERS ======
+const now = () => new Date().toISOString();
+const mask = (str, keep = 6) => {
+  if (!str || typeof str !== "string") return "";
+  if (str.length <= keep) return str;
+  return `${str.slice(0, keep)}…(${str.length})`;
+};
+function logCtx(prefix, ctx) {
+  console.log(`[${now()}] ${prefix}`, ctx);
+}
+
+function logErr(prefix, err, extra = {}) {
+  const base = {
+    message: err?.message,
+    name: err?.name,
+    code: err?.code,
+    stack: err?.stack?.split("\n").slice(0, 3).join(" | "),
+    ...extra,
+  };
+  // If axios error, attach response basics (without huge payloads)
+  if (err?.isAxiosError) {
+    base.axios = {
+      url: err.config?.url,
+      method: err.config?.method,
+      status: err.response?.status,
+      statusText: err.response?.statusText,
+      headers: err.response?.headers,
+      dataType: typeof err.response?.data,
+      dataSnippet:
+        typeof err.response?.data === "string"
+          ? err.response?.data?.slice(0, 1000)
+          : JSON.stringify(err.response?.data)?.slice(0, 500),
+    };
+  }
+  console.error(`[${now()}] ${prefix}`, base);
+}
+
+// ====== UTILS ======
+function getExt(name = "") {
+  const parts = String(name).split(".");
+  return parts.length > 1 ? parts.pop().toLowerCase() : "png";
+}
+
+function verifyProxy(params) {
+  const { signature, ...rest } = params;
+  if (typeof signature !== "string") return false;
+  const message = Object.entries(rest)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .reduce(
+      (acc, [k, v]) => acc + `${k}=${Array.isArray(v) ? v.join(",") : v}`,
+      "",
+    );
+  const digest = crypto
+    .createHmac("sha256", SECRET || "")
+    .update(message)
+    .digest("hex");
+  try {
+    return crypto.timingSafeEqual(
+      Buffer.from(signature, "hex"),
+      Buffer.from(digest, "hex"),
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function fetchAsBuffer(url, requestId) {
+  try {
+    const res = await axios.get(url, {
+      responseType: "arraybuffer",
+      timeout: 60000,
+    });
+    const buf = Buffer.from(res.data);
+    buf.name = `remote.${getExt(new URL(url).pathname)}`;
+    logCtx(`[VTO ${requestId}] fetchAsBuffer ok`, {
+      url,
+      size: buf.length,
+      name: buf.name,
+    });
+    return buf;
+  } catch (err) {
+    logErr(`[VTO ${requestId}] fetchAsBuffer error`, err, { url });
+    throw err;
+  }
+}
+
+function inferMimeFromName(name) {
+  const ext = getExt(name);
+  if (ext === "png") return "image/png";
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+  if (ext === "webp") return "image/webp";
+  return "image/png";
+}
+
+const ALLOWED = new Set(["image/png", "image/jpeg", "image/webp"]);
+
+// ====== VERTEX AUTH ======
+async function getVertexAccessToken(requestId) {
+  try {
+    const auth = new GoogleAuth({
+      credentials: JSON.parse(
+        process.env.GOOGLE_APPLICATION_CREDENTIALS || "{}",
+      ),
+      scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+    });
+    const client = await auth.getClient();
+    const tokenResp = await client.getAccessToken();
+    if (!tokenResp || !tokenResp.token) {
+      throw new Error("No access token from GoogleAuth");
+    }
+    logCtx(`[VTO ${requestId}] getAccessToken ok`, {
+      tokenPreview: mask(tokenResp.token),
+    });
+    return tokenResp.token;
+  } catch (err) {
+    logErr(`[VTO ${requestId}] getAccessToken failed`, err);
+    throw err;
+  }
+}
+
+// ====== VERTEX CALL ======
+/**
+ * Calls Vertex AI Virtual Try-On
+ *  - modelBuf = person image Buffer (with .name)
+ *  - dressBuf = product/garment image Buffer (with .name)
+ * Returns: { base64, mimeType }
+ */
+async function runTryOnOnceWithBuffers({ modelBuf, dressBuf, requestId }) {
+  const accessToken = await getVertexAccessToken(requestId);
+
+  const personB64 = modelBuf.toString("base64");
+  const productB64 = dressBuf.toString("base64");
+
+  const body = {
+    // Request multiple images by increasing sampleCount (1..4)
+    instances: [
+      {
+        personImage: { image: { bytesBase64Encoded: personB64 } },
+        productImages: [{ image: { bytesBase64Encoded: productB64 } }],
+      },
+    ],
+    parameters: { sampleCount: 1 },
+  };
+
+  logCtx(`[VTO ${requestId}] predict request`, {
+    endpoint: VERTEX_ENDPOINT,
+    personSize: personB64.length,
+    productSize: productB64.length,
+    sampleCount: body.parameters.sampleCount,
+  });
+
+  try {
+    const resp = await axios.post(VERTEX_ENDPOINT, body, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      timeout: 120000,
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+    });
+
+    const preds = resp?.data?.predictions || [];
+    logCtx(`[VTO ${requestId}] predict response`, {
+      status: resp?.status,
+      predictionsCount: preds.length,
+      keys: Object.keys(resp?.data || {}),
+    });
+
+    if (!Array.isArray(preds) || preds.length === 0) {
+      throw new Error("Vertex VTO: empty predictions");
+    }
+
+    const first = preds[0];
+    const base64 = first?.bytesBase64Encoded;
+    const mimeType = first?.mimeType || "image/png";
+
+    if (!base64) throw new Error("Vertex VTO: missing image bytes");
+
+    logCtx(`[VTO ${requestId}] predict success`, {
+      mimeType,
+      base64Len: base64.length,
+    });
+
+    return { base64, mimeType };
+  } catch (err) {
+    logErr(`[VTO ${requestId}] predict failed`, err);
+    throw err;
+  }
+}
+
+// ====== BACKGROUND JOB ======
+async function processSessionInBackground({
+  store,
+  sessionId,
+  modelUrl,
+  dressUrl,
+  category, // optional
+  requestId,
+}) {
+  logCtx(`[VTO ${requestId}] BG start`, {
+    sessionId,
+    modelUrl,
+    dressUrl,
+    category,
+  });
+
+  try {
+    // 1) download both URLs to buffers
+    const [modelBuf, dressBuf] = await Promise.all([
+      fetchAsBuffer(modelUrl, requestId),
+      fetchAsBuffer(dressUrl, requestId),
+    ]);
+
+    const modelType = inferMimeFromName(modelBuf.name);
+    const dressType = inferMimeFromName(dressBuf.name);
+
+    logCtx(`[VTO ${requestId}] input types`, { modelType, dressType });
+
+    if (!ALLOWED.has(modelType) || !ALLOWED.has(dressType)) {
+      // mark FAILED + refund
+      logCtx(`[VTO ${requestId}] unsupported mime`, { modelType, dressType });
+      await prisma.$transaction([
+        prisma.store.update({
+          where: { id: store.id },
+          data: { credits: { increment: CREDIT_COST } },
+        }),
+        prisma.tryOnResult.create({
+          data: {
+            storeId: store.id,
+            taskId: `session-${sessionId}`,
+            resultId: `session-${sessionId}_1`,
+            status: "FAILED",
+            errorMsg: "Unsupported image type. Use PNG/JPEG/WEBP.",
+            fileUrl: null,
+            refunded: true,
+            tryOnSessionId: sessionId,
+          },
+        }),
+      ]);
+      return;
+    }
+
+    // 2) generate via Vertex AI
+    const { base64, mimeType } = await runTryOnOnceWithBuffers({
+      modelBuf,
+      dressBuf,
+      requestId,
+    });
+
+    const taskId = `session-${sessionId}`;
+    const resultId = `${taskId}_1`;
+
+    // 3) upload
+    let fileUrl = null;
+    try {
+      fileUrl = await uploadBase64ImageHelper(
+        Buffer.from(base64, "base64"),
+        mimeType,
+        "tryon",
+      );
+      logCtx(`[VTO ${requestId}] upload ok`, { fileUrl });
+    } catch (err) {
+      logErr(`[VTO ${requestId}] upload failed`, err, {
+        mimeType,
+        base64Len: base64.length,
+      });
+      throw err;
+    }
+
+    // 4) persist success
+    await prisma.tryOnResult.create({
+      data: {
+        storeId: store.id,
+        taskId,
+        resultId,
+        status: "SUCCESS",
+        fileUrl,
+        refunded: false,
+        tryOnSessionId: sessionId,
+      },
+    });
+
+    logCtx(`[VTO ${requestId}] BG done`, {
+      status: "SUCCESS",
+      taskId,
+      resultId,
+      fileUrl,
+    });
+  } catch (err) {
+    // refund + failed row
+    logErr(`[VTO ${requestId}] BG error`, err, { sessionId });
+    try {
+      await prisma.$transaction([
+        prisma.store.update({
+          where: { id: store.id },
+          data: { credits: { increment: CREDIT_COST } },
+        }),
+        prisma.tryOnResult.create({
+          data: {
+            storeId: store.id,
+            taskId: `session-${sessionId}`,
+            resultId: `session-${sessionId}_1`,
+            status: "FAILED",
+            errorMsg: String(err?.message || err),
+            fileUrl: null,
+            refunded: true,
+            tryOnSessionId: sessionId,
+          },
+        }),
+      ]);
+      logCtx(`[VTO ${requestId}] BG refund recorded`, { sessionId });
+    } catch (txErr) {
+      logErr(`[VTO ${requestId}] BG refund txn failed`, txErr, { sessionId });
+    }
+  }
+}
+
+// ====== ROUTER ======
+// export async function loader() {
+//   return new Response("Method Not Allowed", { status: 405 });
+// }
+
 export async function loader({ request }) {
-  // const { session, proxy } = await authenticate.public.appProxy(request, {
-  //   apiKey: process.env.SHOPIFY_API_KEY,
-  //   apiSecretKey: process.env.SHOPIFY_API_SECRET,
-  // });
-
-  // console.log("Proxy:", proxy);
-  // console.log("Session of Proxy:", session);
-
-  return new Response("Method Not Allowed", { status: 405 });
+  return json({ ok: true, t: Date.now() });
 }
 
 export async function action({ request }) {
+  // One requestId for the entire lifecycle
+  const requestId = `req_${Math.random().toString(36).slice(2, 10)}`;
+  logCtx(`[VTO ${requestId}] action start`, {
+    method: request.method,
+    url: request.url,
+    hasBody: request.method !== "GET",
+  });
+
   const { session } = await authenticate.public.appProxy(request);
   const { shop } = session;
+
   const url = new URL(request.url);
   const params = Object.fromEntries(url.searchParams);
   const sig = params.signature;
-  const type = params.type || "create";
+  const type = params.type || "createSession";
+
+  logCtx(`[VTO ${requestId}] proxy params`, {
+    shop,
+    type,
+    sigPresent: Boolean(sig),
+  });
 
   if (!shop || !sig || !verifyProxy(params)) {
+    logCtx(`[VTO ${requestId}] proxy verify failed`, {
+      hasShop: !!shop,
+      hasSig: !!sig,
+    });
     return json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const refundCredits = async (imageId) => {
-    try {
-      // Check if credits were already refunded
-      const image = await prisma.tryOnResult.findUnique({
-        where: { id: imageId },
+  try {
+    // ---- return SUCCESS result by sessionId (hydrate) ----
+    if (type === "result") {
+      const sessionId = params.sessionId;
+      if (!sessionId) {
+        logCtx(`[VTO ${requestId}] result missing sessionId`, {});
+        return json({ error: "Missing sessionId" }, { status: 400 });
+      }
+
+      const rec = await prisma.tryOnResult.findFirst({
+        where: { tryOnSessionId: sessionId, status: "SUCCESS" },
+        orderBy: { createdAt: "desc" },
+        select: { fileUrl: true, resultId: true, taskId: true },
       });
 
-      if (image?.refunded) {
-        console.log(`Credits already refunded for imageId: ${imageId}`);
-        return;
-      }
-
-      // Refund credits and mark as refunded in a transaction
-      await prisma.$transaction([
-        prisma.store.update({
-          where: { shop },
-          data: { credits: { increment: 1 } },
-        }),
-
-        prisma.tryOnResult.update({
-          where: { id: imageId },
-          data: { refunded: true },
-        }),
-      ]);
-    } catch (err) {
-      console.error("Credit refund failed:", err);
-    }
-  };
-
-  // const refundCredits = async (imageId) => {
-  //   try {
-  //     await prisma.$transaction(async (tx) => {
-  //       // Flip refunded -> true ONLY if it was false; count===1 means we won the race
-  //       const updated = await tx.tryOnResult.updateMany({
-  //         where: { id: imageId, refunded: false },
-  //         data: { refunded: true },
-  //       });
-  //       if (updated.count === 1) {
-  //         await tx.store.update({
-  //           where: { shop },
-  //           data: { credits: { increment: 1 } },
-  //         });
-  //       }
-  //     });
-  //   } catch (err) {
-  //     console.error("Credit refund failed:", err);
-  //   }
-  // };
-
-  switch (type) {
-    // case "confirm": {
-    //   const taskId = params.taskId;
-    //   if (!taskId) {
-    //     return json({ error: "Missing taskId" }, { status: 400 });
-    //   }
-
-    //   try {
-    //     const pollRes = await axios.get(`${CHECK_URL}?id=${taskId}`, {
-    //       headers: { Authorization: `Bearer ${API_KEY}` },
-    //     });
-
-    //     const resultList = pollRes.data?.data?.resultList || [];
-
-    //     const store = await prisma.store.findUnique({
-    //       where: { shop },
-    //     });
-
-    //     for (const item of resultList) {
-    //       try {
-    //         const imageRecord = await prisma.tryOnResult.findFirst({
-    //           where: {
-    //             taskId,
-    //             resultId: item.id,
-    //           },
-    //         });
-
-    //         if (item?.status === "SUCCESS") {
-    //           if (
-    //             imageRecord.fileUrl === "" &&
-    //             (imageRecord.status === "CREATED" ||
-    //               imageRecord.status === "RUNNING")
-    //           ) {
-    //             const downloadResponse = await axios.get(
-    //               `${SELLER_PIC_DOWNLOAD_URL}?downloadFormat=png&id=${item?.id}`,
-    //               {
-    //                 headers: {
-    //                   Authorization: `Bearer ${API_KEY}`,
-    //                   "Content-Type": "application/json",
-    //                 },
-    //               },
-    //             );
-
-    //             const fileUrl = downloadResponse?.data?.data?.fileUrl;
-    //             if (!fileUrl) {
-    //               throw new Error("No fileUrl provided for successful result");
-    //             }
-
-    //             const uploadedUrl = await uploadImageFromUrl(fileUrl);
-
-    //             await prisma.tryOnResult.update({
-    //               where: { id: imageRecord.id },
-    //               data: {
-    //                 storeId: store?.id,
-    //                 fileUrl: uploadedUrl,
-    //                 taskId: taskId,
-    //                 resultId: item.id,
-    //                 status: item.status,
-    //               },
-    //             });
-    //           }
-    //         }
-
-    //         if (item?.status === "FAILED") {
-    //           await prisma.tryOnResult.update({
-    //             where: { id: imageRecord.id },
-    //             data: {
-    //               storeId: store?.id,
-    //               fileUrl: null,
-    //               taskId: taskId,
-    //               resultId: item.id,
-    //               status: item.status,
-    //               errorMsg: item.errorMsg,
-    //             },
-    //           });
-    //           await refundCredits(imageRecord.id);
-    //         }
-    //       } catch (uploadErr) {
-    //         console.error("Image upload failed:", uploadErr);
-    //       }
-    //     }
-
-    //     const allFailed =
-    //       resultList.length > 0 &&
-    //       resultList.every((item) => item.status === "FAILED");
-    //     if (allFailed) {
-    //       await prisma.store.update({
-    //         where: { shop },
-    //         data: { credits: { increment: CREDIT_COST } },
-    //       });
-    //       return json({ resultList, refunded: true });
-    //     }
-
-    //     return json({ resultList });
-    //   } catch (err) {
-    //     console.log("Error while cofirmation:", err);
-
-    //     await prisma.store.update({
-    //       where: { shop },
-    //       data: { credits: { increment: CREDIT_COST } },
-    //     });
-    //     return json({ error: err.message || "Unknown error" }, { status: 500 });
-    //   }
-    // }
-
-    case "confirm": {
-      const taskId = params.taskId;
-      if (!taskId) {
-        return json({ error: "Missing taskId" }, { status: 400 });
-      }
-
-      try {
-        // 1) Poll SellerPic
-        const pollRes = await axios.get(`${CHECK_URL}?id=${taskId}`, {
-          headers: { Authorization: `Bearer ${API_KEY}` },
-        });
-
-        const resultList = pollRes.data?.data?.resultList || [];
-
-        const store = await prisma.store.findUnique({ where: { shop } });
-        if (!store) return json({ error: "Store not found" }, { status: 404 });
-
-        // console.log("ResultList:", resultList);
-
-        // 2) Upsert & reconcile each result by (taskId, resultId)
-        for (const item of resultList) {
-          try {
-            const resultId = item.id;
-            const status = (item?.status || "").toUpperCase();
-            const errorMsg = item?.errorMsg || null;
-
-            // Upsert guarantees a row exists; capture the returned record
-            const record = await prisma.tryOnResult.findFirst({
-              where: { taskId, resultId },
-            });
-
-            if (status === "SUCCESS" && !record.fileUrl) {
-              // Ask SellerPic for a downloadable URL
-              const dl = await axios.get(
-                `${SELLER_PIC_DOWNLOAD_URL}?downloadFormat=png&id=${resultId}`,
-                { headers: { Authorization: `Bearer ${API_KEY}` } },
-              );
-
-              const remoteUrl = dl?.data?.data?.fileUrl;
-              if (remoteUrl) {
-                // Upload to your bucket → canonical URL
-                const uploadedUrl = await uploadImageFromUrl(remoteUrl);
-
-                await prisma.tryOnResult.update({
-                  where: { id: record.id },
-                  data: { fileUrl: uploadedUrl, status },
-                });
-              }
-            }
-
-            if (status === "FAILED") {
-              // Ensure DB reflects failure
-              await prisma.tryOnResult.update({
-                where: { id: record.id },
-                data: { fileUrl: null, errorMsg, status },
-              });
-              // Refund exactly once per failed result
-              await refundCredits(record.id);
-            }
-          } catch (perItemErr) {
-            console.error("Per-result reconciliation failed:", perItemErr);
-          }
-        }
-
-        // 3) Return your canonical DB state
-        const results = await prisma.tryOnResult.findMany({
-          where: { taskId },
-          orderBy: { createdAt: "asc" },
-        });
-
-        return json({ resultList: results }, { status: 200 });
-      } catch (err) {
-        console.log("Error while confirmation:", err);
-        // Do NOT blanket refund here; you refund per FAILED result above.
-        return json({ error: err.message || "Unknown error" }, { status: 500 });
-      }
+      logCtx(`[VTO ${requestId}] result query`, { found: !!rec, sessionId });
+      if (!rec?.fileUrl)
+        return json({ error: "Result not found" }, { status: 404 });
+      return json(rec, { status: 200 });
     }
 
-    case "create":
-    default: {
+    // ---- confirm (status) by sessionId ----
+    if (type === "confirm") {
+      const sessionId = params.sessionId;
+      if (!sessionId) {
+        logCtx(`[VTO ${requestId}] confirm missing sessionId`, {});
+        return json({ error: "Missing sessionId" }, { status: 400 });
+      }
+
+      const list = await prisma.tryOnResult.findMany({
+        where: { tryOnSessionId: sessionId },
+        orderBy: { createdAt: "desc" },
+        select: {
+          status: true,
+          fileUrl: true,
+          resultId: true,
+          taskId: true,
+          errorMsg: true,
+        },
+      });
+
+      const success = list.find((r) => r.status === "SUCCESS");
+      logCtx(`[VTO ${requestId}] confirm check`, {
+        sessionId,
+        total: list.length,
+        success: !!success,
+      });
+
+      if (success)
+        return json({ status: "SUCCESS", ...success }, { status: 200 });
+
+      const failedOnly =
+        list.length > 0 && list.every((r) => r.status === "FAILED");
+      if (failedOnly) return json({ status: "FAILED", list }, { status: 200 });
+
+      return json({ status: "PENDING", list }, { status: 200 });
+    }
+
+    // ---- createSession ----
+    if (type === "createSession") {
+      console.log("Type Create session.....")
+
+      // Quick env assert per request (useful on serverless cold starts)
+      if (!VERTEX_AI_PROJECT_ID) {
+        logCtx(`[VTO ${requestId}] missing VERTEX_AI_PROJECT_ID`, {});
+        return json(
+          { error: "Server misconfigured: VERTEX_AI_PROJECT_ID" },
+          { status: 500 },
+        );
+      }
+
       const uploadHandler = unstable_createMemoryUploadHandler({
         maxPartSize: UPLOAD_MAX,
       });
+      let formData;
+      try {
+        formData = await unstable_parseMultipartFormData(
+          request,
+          uploadHandler,
+        );
+      } catch (err) {
+        logErr(`[VTO ${requestId}] parseMultipart failed`, err);
+        return json({ error: "Invalid multipart form" }, { status: 400 });
+      }
 
-      const formData = await unstable_parseMultipartFormData(
-        request,
-        uploadHandler,
-      );
+      const dressInput = formData.get("dressImage"); // File or URL
+      const modelInput = formData.get("modelImage"); // File or URL
+      const category = formData.get("category"); // optional for Vertex
 
-      const dressInput = formData.get("dressImage");
-      const modelInput = formData.get("modelImage");
-      const category = formData.get("category");
+      logCtx(`[VTO ${requestId}] createSession inputs`, {
+        hasDress: !!dressInput,
+        hasModel: !!modelInput,
+        category,
+        dressType: dressInput?.constructor?.name,
+        modelType: modelInput?.constructor?.name,
+      });
 
       if (!dressInput || !modelInput || !category) {
         return json({ error: "Missing fields" }, { status: 400 });
       }
 
-      console.log("dressInput", dressInput);
-      console.log("modelInput", modelInput);
-      console.log("category", category);
-
+      // 1) reserve credits
       const store = await prisma.store
         .update({
           where: { shop, credits: { gte: CREDIT_COST } },
           data: { credits: { decrement: CREDIT_COST } },
         })
-        .catch(() => null);
-      if (!store) {
+        .catch((err) => {
+          logErr(`[VTO ${requestId}] credit reserve failed`, err, { shop });
+          return null;
+        });
+
+      if (!store)
         return json({ error: "Insufficient credits" }, { status: 402 });
-      }
+
+      // 2) Normalize inputs to URLs (upload files immediately)
+      let modelUrl;
+      let dressUrl;
 
       try {
-        const [dressBuffer, modelBuffer] = await Promise.all([
-          toBuffer(dressInput),
-          toBuffer(modelInput),
-        ]);
-        const [dressKey, modelKey] = await Promise.all([
-          uploadToSellerPic(dressBuffer),
-          uploadToSellerPic(modelBuffer),
-        ]);
-
-        const payload = { modelImageKey: modelKey };
-
-        if (category === "top") payload.top = { imageKey: dressKey };
-        else if (category === "bottom") payload.bottom = { imageKey: dressKey };
-        else if (category === "one-piece")
-          payload.onePiece = { imageKey: dressKey };
-        else throw new Error("Invalid category");
-
-        const createRes = await axios.post(TRYON_URL, payload, {
-          headers: {
-            Authorization: `Bearer ${API_KEY}`,
-            "Content-Type": "application/json",
-          },
-        });
-
-        console.log("Task Response:", createRes);
-
-        const taskId = createRes.data?.data?.id;
-
-        const pollRes = await axios.get(`${CHECK_URL}?id=${taskId}`, {
-          headers: { Authorization: `Bearer ${API_KEY}` },
-        });
-
-        const resultList = pollRes?.data?.data?.resultList;
-
-        if (!taskId || !Array.isArray(resultList)) {
-          throw new Error("Task ID missing");
-        }
-
-        if (createRes?.data?.code === 0) {
-          for (const item of resultList) {
-            try {
-              await prisma.tryOnResult.create({
-                data: {
-                  storeId: store?.id,
-                  fileUrl: "",
-                  taskId: taskId,
-                  resultId: item.id,
-                  status: item.status,
-                },
-              });
-            } catch (uploadErr) {
-              console.error("Image upload failed:", uploadErr);
-            }
-          }
+        if (typeof modelInput === "string") {
+          modelUrl = modelInput;
         } else {
-          //
+          const ab = Buffer.from(await modelInput.arrayBuffer());
+          const mime = inferMimeFromName(modelInput.name);
+          const uploaded = await uploadBase64ImageHelper(
+            ab,
+            mime,
+            "tryon-inputs",
+          );
+          modelUrl = uploaded;
         }
 
-        return json({ resultList, taskId }, { status: 200 });
+        if (typeof dressInput === "string") {
+          dressUrl = dressInput;
+        } else {
+          const ab = Buffer.from(await dressInput.arrayBuffer());
+          const mime = inferMimeFromName(dressInput.name);
+          const uploaded = await uploadBase64ImageHelper(
+            ab,
+            mime,
+            "tryon-inputs",
+          );
+          dressUrl = uploaded;
+        }
       } catch (err) {
-        console.log("Error while creation:", err);
-        await prisma.store.update({
-          where: { shop },
-          data: { credits: { increment: CREDIT_COST } },
-        });
-        return json({ error: err.message || "Unknown error" }, { status: 500 });
+        logErr(`[VTO ${requestId}] input upload failed`, err);
+        // refund immediately if upload fails
+        try {
+          await prisma.store.update({
+            where: { id: store.id },
+            data: { credits: { increment: CREDIT_COST } },
+          });
+        } catch (txErr) {
+          logErr(`[VTO ${requestId}] refund after upload fail failed`, txErr);
+        }
+        return json({ error: "Failed to process inputs" }, { status: 500 });
       }
+
+      // 3) persist a TryOnSession
+      const sessionRow = await prisma.tryOnSession.create({
+        data: {
+          storeId: store.id,
+          category: String(category),
+          modelUrl,
+          dressUrl,
+          variants: 1,
+        },
+        select: { id: true },
+      });
+
+      logCtx(`[VTO ${requestId}] session created`, {
+        sessionId: sessionRow.id,
+        modelUrl,
+        dressUrl,
+      });
+
+      // 4) start background job (detached)
+      setImmediate(() =>
+        processSessionInBackground({
+          store,
+          sessionId: sessionRow.id,
+          modelUrl,
+          dressUrl,
+          category: String(category),
+          requestId,
+        }).catch((err) => logErr(`[VTO ${requestId}] BG top-level fail`, err)),
+      );
+
+      // 5) return sessionId immediately
+      return json({ sessionId: sessionRow.id }, { status: 200 });
     }
+
+    // fallback
+    logCtx(`[VTO ${requestId}] unsupported type`, { type });
+    return json({ error: "Unsupported type" }, { status: 400 });
+  } catch (err) {
+    logErr(`[VTO ${requestId}] action fatal`, err, { type });
+    return json({ error: "Internal error" }, { status: 500 });
+  } finally {
+    logCtx(`[VTO ${requestId}] action end`, { type });
   }
 }

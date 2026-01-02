@@ -1,4 +1,3 @@
-
 import { useEffect } from "react";
 import { useFetcher, useNavigate } from "@remix-run/react";
 import {
@@ -263,13 +262,15 @@ export default function Index() {
           anytime.
         </CalloutCard>
 
+        <Box as="div" marginBlockStart="600"></Box>
+
         {/* Footer note */}
-        <Card>
+        {/* <Card>
           <Text tone="subdued" alignment="center">
             Note: <strong>1 try-on = 4 credits</strong>. Usage and quotas are
             tracked in try-ons.
           </Text>
-        </Card>
+        </Card> */}
       </BlockStack>
     </Page>
   );

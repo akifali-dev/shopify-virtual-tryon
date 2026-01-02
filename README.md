@@ -382,4 +382,3 @@ If the metafield is left empty, the app falls back to the product's first media 
 - [Getting started with internationalizing your app](https://shopify.dev/docs/apps/best-practices/internationalization/getting-started)
 # shopify-tryon-v2
 # virtualfittingroom
-# shopify-virtual-tryon

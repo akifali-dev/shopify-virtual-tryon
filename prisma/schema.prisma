@@ -47,6 +47,7 @@ model Store {
 
   subscriptions Subscription[]
   TryOnResult   TryOnResult[]
+  TryOnSession  TryOnSession[]
 }
 
 model Subscription {
@@ -64,18 +65,33 @@ model Subscription {
   storeId        String?   @db.ObjectId
 }
 
+model TryOnSession {
+  id           String        @id @default(auto()) @map("_id") @db.ObjectId
+  storeId      String        @db.ObjectId
+  store        Store         @relation(fields: [storeId], references: [id])
+  category     String
+  modelUrl     String
+  dressUrl     String
+  variants     Int           @default(4)
+  createdAt    DateTime      @default(now())
+  // results relation (if you want)
+  tryOnResults TryOnResult[]
+}
+
 model TryOnResult {
-  id        String   @id @default(auto()) @map("_id") @db.ObjectId
-  storeId   String   @db.ObjectId
-  store     Store    @relation(fields: [storeId], references: [id])
-  taskId    String
-  resultId  String
-  status    String
-  errorMsg  String?
-  fileUrl   String?
-  refunded  Boolean  @default(false) // whether we've returned 1 credit for this failed result
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id             String        @id @default(auto()) @map("_id") @db.ObjectId
+  storeId        String        @db.ObjectId
+  store          Store         @relation(fields: [storeId], references: [id])
+  taskId         String
+  resultId       String
+  status         String
+  errorMsg       String?
+  fileUrl        String?
+  refunded       Boolean       @default(false) // whether we've returned 1 credit for this failed result
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  TryOnSession   TryOnSession? @relation(fields: [tryOnSessionId], references: [id])
+  tryOnSessionId String?
 
   @@unique([storeId, taskId, resultId])
   @@index([taskId])

@@ -1,6 +1,6 @@
 import { json } from "@remix-run/node";
 import { useLoaderData } from "@remix-run/react";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import {
   Page,
   Card,
@@ -11,7 +11,6 @@ import {
   Divider,
   ProgressBar,
   Tag,
-  Box,
 } from "@shopify/polaris";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
@@ -24,7 +23,6 @@ export const loader = async ({ request }) => {
     where: { shop: session.shop },
   });
 
-  // Active subscription (most recent)
   const subscription = await prisma.subscription.findFirst({
     where: { shop: session.shop, status: "ACTIVE" },
     orderBy: { updatedAt: "desc" },
@@ -69,31 +67,37 @@ function getCycleDays(updatedAt, interval) {
 export default function StatsPage() {
   const { store, subscription } = useLoaderData();
 
-  // ==== Source values from DB ====
-  const creditsRemainingLive = store?.credits ?? 0; // live credits in wallet
-  const totalCreditsPlan = subscription?.credits ?? 0; // plan allocation (credits)
+  const creditsRemainingLive = store?.credits ?? 0;
 
-  // ==== Convert to try-ons (primary unit) ====
-  const TRYON_TO_CREDITS = 4;
-  const toTryOns = (credits) => Math.floor((credits || 0) / TRYON_TO_CREDITS);
+  const isFree = !subscription; // <— no active subscription
+  const planKey = subscription?.planKey;
+  const planFromConfig = planKey ? PLANS?.[planKey] : undefined;
 
-  const tryOnsAlloc = toTryOns(totalCreditsPlan); // plan allocation in try-ons / cycle
-  const tryOnsLive = toTryOns(creditsRemainingLive); // currently available in try-ons (wallet)
+  // Allocation:
+  // - Paid plan: subscription.quota (fallback to plan config)
+  // - Free plan: show wallet balance (one-time free credits) as allocation
+  const allocationCredits = isFree
+    ? creditsRemainingLive
+    : (subscription?.quota ?? planFromConfig?.quota ?? 0);
 
-  // We present plan allocation vs usage this cycle (ignoring extra wallet surplus)
-  const surplusTryOns = Math.max(0, tryOnsLive - tryOnsAlloc); // rollover/extra beyond plan
-  const planTryOnsRemaining = Math.min(tryOnsLive, tryOnsAlloc); // capped remaining within plan
-  const tryOnsUsed = Math.max(tryOnsAlloc - planTryOnsRemaining, 0); // used within allocation
-  const usagePercentTryOns = tryOnsAlloc
-    ? Math.min(100, Math.round((tryOnsUsed / tryOnsAlloc) * 100))
+  // Usage (within allocation)
+  const planCreditsRemaining = Math.min(
+    creditsRemainingLive,
+    allocationCredits,
+  );
+  const creditsUsed = Math.max(allocationCredits - planCreditsRemaining, 0);
+  const usagePercent = allocationCredits
+    ? Math.min(100, Math.round((creditsUsed / allocationCredits) * 100))
     : 0;
 
-  // Plan & cycle info
-  const planName = subscription
-    ? PLANS?.[subscription.planKey]?.name || subscription.planKey
-    : "None";
+  const surplusCredits = Math.max(0, creditsRemainingLive - allocationCredits);
 
-  const renewal = subscription
+  // Labels
+  const planName = isFree
+    ? "Free"
+    : planFromConfig?.name || subscription?.planKey || "Plan";
+
+  const renewal = !isFree
     ? getRenewalDate(subscription.updatedAt, subscription.interval)
     : null;
 
@@ -101,30 +105,30 @@ export default function StatsPage() {
     daysUsed,
     daysTotal,
     percent: cyclePercent,
-  } = subscription
+  } = !isFree
     ? getCycleDays(subscription.updatedAt, subscription.interval)
     : { daysUsed: 0, daysTotal: 0, percent: 0 };
 
-  // Pace / forecast
-  const avgDailyUsageTryOns = useMemo(() => {
-    return daysUsed ? (tryOnsUsed / daysUsed).toFixed(2) : `${tryOnsUsed}`;
-  }, [tryOnsUsed, daysUsed]);
+  // Pace / forecast (skip for Free to avoid confusion)
+  const avgDailyUsage = useMemo(() => {
+    return daysUsed ? (creditsUsed / daysUsed).toFixed(2) : `${creditsUsed}`;
+  }, [creditsUsed, daysUsed]);
 
-  const projectedTryOns = useMemo(() => {
-    if (!daysUsed) return tryOnsUsed;
-    return Math.round((tryOnsUsed / daysUsed) * daysTotal);
-  }, [tryOnsUsed, daysUsed, daysTotal]);
+  const projectedUsed = useMemo(() => {
+    if (!daysUsed) return creditsUsed;
+    return Math.round((creditsUsed / daysUsed) * daysTotal);
+  }, [creditsUsed, daysUsed, daysTotal]);
 
-  const projectedRemaining = Math.max(0, tryOnsAlloc - projectedTryOns);
+  const projectedRemaining = Math.max(0, allocationCredits - projectedUsed);
   const paceLabel =
-    projectedTryOns > tryOnsAlloc
+    projectedUsed > allocationCredits
       ? "Over pace"
-      : projectedTryOns === tryOnsAlloc
+      : projectedUsed === allocationCredits
         ? "On pace"
         : "Under pace";
 
   return (
-    <Page title="Try-on usage" subtitle="Track your try-ons and cycle progress">
+    <Page title="Usage (Try-ons)" subtitle="Track your try-ons and progress">
       <BlockStack gap="400">
         {/* Top summary row */}
         <InlineGrid columns={{ xs: 1, md: 3 }} gap="400">
@@ -134,23 +138,32 @@ export default function StatsPage() {
                 <Text as="h3" variant="headingMd">
                   Plan
                 </Text>
-                {subscription?.status && <Tag>{subscription.status}</Tag>}
+                <Tag>
+                  {isFree ? "FREE" : (subscription?.status ?? "ACTIVE")}
+                </Tag>
               </InlineStack>
 
               <Text variant="headingLg">{planName}</Text>
 
-              {renewal && (
+              {!isFree && renewal && (
                 <Text tone="subdued">
                   Next renewal: {renewal.toDateString()}
+                </Text>
+              )}
+              {isFree && (
+                <Text tone="subdued">
+                  You’re on the Free plan with one-time trial credits.
                 </Text>
               )}
 
               <Divider />
 
               <InlineStack align="space-between">
-                <Text tone="subdued">Allocation</Text>
+                <Text tone="subdued">
+                  {isFree ? "Available (one-time)" : "Allocation (per cycle)"}
+                </Text>
                 <Text as="p" variant="headingLg">
-                  {tryOnsAlloc.toLocaleString()} try-ons
+                  {allocationCredits.toLocaleString()} Try-ons
                 </Text>
               </InlineStack>
             </BlockStack>
@@ -159,42 +172,50 @@ export default function StatsPage() {
           <Card>
             <BlockStack gap="200">
               <Text as="h3" variant="headingMd">
-                Try-on usage
+                Usage {isFree ? "" : "this cycle"}
               </Text>
 
               <InlineGrid columns={{ xs: 1, sm: 3 }}>
                 <BlockStack gap="050">
                   <Text tone="subdued">Used</Text>
-                  <Text variant="headingLg">{tryOnsUsed.toLocaleString()}</Text>
-                </BlockStack>
-                <BlockStack gap="050">
-                  <Text tone="subdued">Remaining</Text>
                   <Text variant="headingLg">
-                    {planTryOnsRemaining.toLocaleString()}
+                    {creditsUsed.toLocaleString()}
                   </Text>
                 </BlockStack>
                 <BlockStack gap="050">
-                  <Text tone="subdued">Surplus</Text>
+                  <Text tone="subdued">
+                    {isFree ? "Remaining" : "Remaining (in plan)"}
+                  </Text>
                   <Text variant="headingLg">
-                    {surplusTryOns.toLocaleString()}
+                    {planCreditsRemaining.toLocaleString()}
                   </Text>
                 </BlockStack>
+                {!isFree && (
+                  <BlockStack gap="050">
+                    <Text tone="subdued">Surplus (wallet)</Text>
+                    <Text variant="headingLg">
+                      {surplusCredits.toLocaleString()}
+                    </Text>
+                  </BlockStack>
+                )}
               </InlineGrid>
 
               <Divider />
 
               <BlockStack gap="150">
-                <Text tone="subdued">Allocation used</Text>
+                <Text tone="subdued">
+                  {isFree ? "Trial credits used" : "Allocation used"}
+                </Text>
                 <ProgressBar
-                  progress={usagePercentTryOns}
-                  ariaLabelledby="usage-tryons"
+                  progress={usagePercent}
+                  ariaLabelledby="usage-bar"
                 />
                 <InlineStack align="space-between">
-                  <Text id="usage-tryons" tone="subdued">
-                    {usagePercentTryOns}% used
+                  <Text id="usage-bar" tone="subdued">
+                    {usagePercent}% used
                   </Text>
                   <Text tone="subdued">
-                    {planTryOnsRemaining.toLocaleString()} remaining
+                    {planCreditsRemaining.toLocaleString()} remaining
                   </Text>
                 </InlineStack>
               </BlockStack>
@@ -204,36 +225,45 @@ export default function StatsPage() {
           <Card>
             <BlockStack gap="200">
               <Text as="h3" variant="headingMd">
-                Cycle progress
+                {isFree ? "Upgrade for monthly allocation" : "Cycle progress"}
               </Text>
 
-              <BlockStack gap="150">
-                <ProgressBar
-                  progress={cyclePercent}
-                  ariaLabelledby="cycle-label"
-                />
-                <InlineStack align="space-between">
-                  <Text id="cycle-label" tone="subdued">
-                    {daysUsed} days elapsed
-                  </Text>
-                  <Text tone="subdued">
-                    {Math.max(0, daysTotal - daysUsed)} days left
-                  </Text>
-                </InlineStack>
-              </BlockStack>
+              {isFree ? (
+                <Text tone="subdued">
+                  Upgrade to a paid plan to get a monthly try-on allocation and
+                  renewals.
+                </Text>
+              ) : (
+                <>
+                  <BlockStack gap="150">
+                    <ProgressBar
+                      progress={cyclePercent}
+                      ariaLabelledby="cycle-bar"
+                    />
+                    <InlineStack align="space-between">
+                      <Text id="cycle-bar" tone="subdued">
+                        {daysUsed} days elapsed
+                      </Text>
+                      <Text tone="subdued">
+                        {Math.max(0, daysTotal - daysUsed)} days left
+                      </Text>
+                    </InlineStack>
+                  </BlockStack>
 
-              <Divider />
+                  <Divider />
 
-              <InlineGrid columns={{ xs: 1, sm: 2 }}>
-                <BlockStack gap="050">
-                  <Text tone="subdued">Avg/day</Text>
-                  <Text variant="headingLg">{avgDailyUsageTryOns}</Text>
-                </BlockStack>
-                <BlockStack gap="050">
-                  <Text tone="subdued">Pace</Text>
-                  <Text variant="headingLg">{paceLabel}</Text>
-                </BlockStack>
-              </InlineGrid>
+                  <InlineGrid columns={{ xs: 1, sm: 2 }}>
+                    <BlockStack gap="050">
+                      <Text tone="subdued">Avg/day</Text>
+                      <Text variant="headingLg">{avgDailyUsage}</Text>
+                    </BlockStack>
+                    <BlockStack gap="050">
+                      <Text tone="subdued">Pace</Text>
+                      <Text variant="headingLg">{paceLabel}</Text>
+                    </BlockStack>
+                  </InlineGrid>
+                </>
+              )}
             </BlockStack>
           </Card>
         </InlineGrid>
@@ -242,49 +272,71 @@ export default function StatsPage() {
         <InlineGrid columns={{ xs: 1, md: 2 }} gap="400">
           <Card title="Details">
             <BlockStack gap="200">
-              <Text tone="subdued">
-                Your current plan provides{" "}
-                <strong>{tryOnsAlloc.toLocaleString()}</strong> try-ons per
-                cycle.
-              </Text>
-              <Text tone="subdued">
-                You’ve used <strong>{tryOnsUsed.toLocaleString()}</strong>{" "}
-                try-ons so far ({usagePercentTryOns}% of your allocation).
-              </Text>
-              {surplusTryOns > 0 && (
-                <Text tone="subdued">
-                  You have <strong>{surplusTryOns.toLocaleString()}</strong>{" "}
-                  surplus try-ons available.
-                </Text>
+              {isFree ? (
+                <>
+                  <Text tone="subdued">
+                    You currently have{" "}
+                    <strong>{allocationCredits.toLocaleString()}</strong> free
+                    try-ons available.
+                  </Text>
+                  <Text tone="subdued">
+                    Free credits are one-time. Upgrade to get a recurring
+                    monthly allocation and advanced features.
+                  </Text>
+                </>
+              ) : (
+                <>
+                  <Text tone="subdued">
+                    Your current plan provides{" "}
+                    <strong>{allocationCredits.toLocaleString()}</strong>{" "}
+                    try-ons per cycle.
+                  </Text>
+                  <Text tone="subdued">
+                    You’ve used <strong>{creditsUsed.toLocaleString()}</strong>{" "}
+                    try-ons so far ({usagePercent}% of your allocation).
+                  </Text>
+                  {surplusCredits > 0 && (
+                    <Text tone="subdued">
+                      You have{" "}
+                      <strong>{surplusCredits.toLocaleString()}</strong> surplus
+                      try-ons in your wallet beyond this cycle’s allocation.
+                    </Text>
+                  )}
+                </>
               )}
-              <Divider />
-              <Text alignment="center" tone="subdued">
-                Try-ons are the primary unit of metering.
-              </Text>
             </BlockStack>
           </Card>
 
-          <Card title="Forecast">
+          <Card title={isFree ? "Why upgrade?" : "Forecast"}>
             <BlockStack gap="200">
-              <InlineGrid columns={{ xs: 1, sm: 2 }}>
-                <BlockStack gap="050">
-                  <Text tone="subdued">Projected usage</Text>
-                  <Text variant="headingLg">
-                    {projectedTryOns.toLocaleString()} /{" "}
-                    {tryOnsAlloc.toLocaleString()}
+              {isFree ? (
+                <Text tone="subdued">
+                  Paid plans unlock a monthly try-on pool, auto-renewals, and
+                  priority support — perfect for steady growth.
+                </Text>
+              ) : (
+                <>
+                  <InlineGrid columns={{ xs: 1, sm: 2 }}>
+                    <BlockStack gap="050">
+                      <Text tone="subdued">Projected usage</Text>
+                      <Text variant="headingLg">
+                        {projectedUsed.toLocaleString()} /{" "}
+                        {allocationCredits.toLocaleString()}
+                      </Text>
+                    </BlockStack>
+                    <BlockStack gap="050">
+                      <Text tone="subdued">Projected remaining</Text>
+                      <Text variant="headingLg">
+                        {projectedRemaining.toLocaleString()}
+                      </Text>
+                    </BlockStack>
+                  </InlineGrid>
+                  <Text tone="subdued">
+                    Projection assumes your current daily average continues for
+                    the rest of the cycle.
                   </Text>
-                </BlockStack>
-                <BlockStack gap="050">
-                  <Text tone="subdued">Projected remaining</Text>
-                  <Text variant="headingLg">
-                    {projectedRemaining.toLocaleString()}
-                  </Text>
-                </BlockStack>
-              </InlineGrid>
-              <Text tone="subdued">
-                Projection assumes your current daily average continues for the
-                rest of the cycle.
-              </Text>
+                </>
+              )}
             </BlockStack>
           </Card>
         </InlineGrid>

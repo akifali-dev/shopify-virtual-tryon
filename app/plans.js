@@ -1,7 +1,7 @@
 import { BillingInterval } from "@shopify/shopify-app-remix/server";
 
 /** 1 try-on = 4 credits (for any legacy conversion needs) */
-export const TRYON_TO_CREDITS = 4;
+export const TRYON_TO_CREDITS = 1;
 
 /** Plan keys */
 export const BASIC = "BASIC";
@@ -15,12 +15,12 @@ export const PLANS = {
   [BASIC]: {
     key: BASIC,
     name: "Basic",
-    quota: 50, // try-ons / month
-    amount: 32, // USD
+    quota: 100, // try-ons / month
+    amount: 19, // USD
     currencyCode: "USD",
     interval: BillingInterval.Every30Days,
     features: [
-      "50 try-ons per month",
+      "100 try-ons per month",
       "Product-page Try On button",
       "Button styling",
       "Email support",
@@ -33,12 +33,12 @@ export const PLANS = {
   [GROWTH]: {
     key: GROWTH,
     name: "Growth",
-    quota: 125, // try-ons / month
-    amount: 75, // USD
+    quota: 200, // try-ons / month
+    amount: 36, // USD
     currencyCode: "USD",
     interval: BillingInterval.Every30Days,
     features: [
-      "125 try-ons per month",
+      "200 try-ons per month",
       "Product-page Try On button",
       "Button styling",
       "Email support",
@@ -51,12 +51,12 @@ export const PLANS = {
   [ADVANCED]: {
     key: ADVANCED,
     name: "Advanced",
-    quota: 250, // try-ons / month
-    amount: 130, // USD
+    quota: 350, // try-ons / month
+    amount: 59, // USD
     currencyCode: "USD",
     interval: BillingInterval.Every30Days,
     features: [
-      "250 try-ons per month",
+      "350 try-ons per month",
       "Product-page Try On button",
       "Button styling",
       "Email support",
@@ -69,12 +69,12 @@ export const PLANS = {
   [PRO]: {
     key: PRO,
     name: "Pro",
-    quota: 500, // try-ons / month
-    amount: 240, // USD
+    quota: 650, // try-ons / month
+    amount: 113, // USD
     currencyCode: "USD",
     interval: BillingInterval.Every30Days,
     features: [
-      "500 try-ons per month",
+      "650 try-ons per month",
       "Product-page Try On button",
       "Button styling",
       "Email support",
@@ -87,12 +87,12 @@ export const PLANS = {
   [BUSINESS]: {
     key: BUSINESS,
     name: "Business",
-    quota: 1000, // try-ons / month
-    amount: 480, // USD
+    quota: 1300, // try-ons / month
+    amount: 226, // USD
     currencyCode: "USD",
     interval: BillingInterval.Every30Days,
     features: [
-      "1,000 try-ons per month",
+      "1300 try-ons per month",
       "Product-page Try On button",
       "Button styling",
       "Email support",
@@ -105,12 +105,12 @@ export const PLANS = {
   [ENTERPRISE]: {
     key: ENTERPRISE,
     name: "Enterprise",
-    quota: 2000, // try-ons / month
-    amount: 960, // USD
+    quota: 2600, // try-ons / month
+    amount: 450, // USD
     currencyCode: "USD",
     interval: BillingInterval.Every30Days,
     features: [
-      "2,000 try-ons per month",
+      "2600 try-ons per month",
       "Product-page Try On button",
       "Button styling",
       "Email support",

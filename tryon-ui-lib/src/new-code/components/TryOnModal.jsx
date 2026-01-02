@@ -3,19 +3,11 @@ import React, { useEffect, useState } from "react";
 import { Modal } from "./Modal";
 import {
   ArrowLeft,
-  Check,
   ChevronDown,
-  ChevronLeft,
-  ChevronRight,
-  ChevronUp,
   CircleAlert,
   CircleCheck,
-  Copy,
   Download,
   Loader,
-  Loader2,
-  LoaderCircle,
-  RefreshCcw,
   Share2,
   Upload,
   X,
@@ -23,85 +15,54 @@ import {
 import TextType from "./TypeText";
 import { SparkleProgressAnimation } from "./LoadingEmoji";
 import { MinimizedTryOn } from "./MinimizedTryOn";
-import { Swiper, SwiperSlide } from "swiper/react";
-import "swiper/css";
 
 export function TryOnModal({
   onClose,
   garmentImage,
-  // garmentName,
   garmentType: initialGarmentType,
   isNew,
 }) {
-  const swiperRef = React.useRef(null);
-  // console.log("Element Trigred...");
   const fileInputRef = React.useRef(null);
+
   const [isOpen, setIsOpen] = React.useState(false);
+  const [isMinimized, setIsMinimized] = React.useState(false);
   const [shareOpen, setShareOpen] = useState(false);
 
-  // const [isOpen, setIsOpen] = React.useState(false);
   const [userPhoto, setUserPhoto] = React.useState();
-  const [previewImage, setPreviewImage] = React.useState("");
-  const [previewImageId, setPreviewImageId] = React.useState(null);
-  const [generatedResults, setGeneratedResults] = React.useState([]);
+  const [result, setResult] = React.useState(null); // { fileUrl, taskId, resultId }
   const [selectedFile, setSelectedFile] = React.useState(null);
+
   const [isLoading, setIsLoading] = React.useState(false);
-  const [isCanceled, setIsCanceled] = React.useState(false);
   const [error, setError] = React.useState("");
-  const [taskId, setTaskId] = React.useState(null);
+  const [isSubmitting, setIsSubmitting] = React.useState(false);
+
   const [selectedGarmentType, setSelectedGarmentType] =
     React.useState(initialGarmentType);
+
+  // progress typing UI
   const [progress, setProgress] = React.useState(0);
   const progressStartRef = React.useRef(null);
-  const TARGET_TO_90_MS = 50000; // 40 seconds to reach 90%
-  const SEGMENTS = 5; // split into 5 chunks
-  const SEGMENT_MS = TARGET_TO_90_MS / SEGMENTS; // 10000ms per chunk
-
-  const [stage, setStage] = React.useState(0); // which sentence (0..4)
-  const [copiedUrl, setCopiedUrl] = React.useState(false);
-  const [anySuccess, setAnySuccess] = React.useState(false);
-  const [anyRunning, setAnyRunning] = React.useState(false);
-
-  // index of the currently previewed SUCCESS image
-  const [currentIdx, setCurrentIdx] = React.useState(0);
-
+  const TARGET_TO_90_MS = 60000;
+  const SEGMENTS = 5;
+  const SEGMENT_MS = TARGET_TO_90_MS / SEGMENTS;
+  const [stage, setStage] = React.useState(0);
+  const pollTimerRef = React.useRef(null);
   const [selected, setSelected] = useState("top");
-
   const options = [
     { label: "Top", value: "top" },
     { label: "Bottom", value: "bottom" },
-    // { label: "One Piece", value: "one-piece" },
   ];
 
-  const TASKS_KEY = "tryonTaskIds";
-  const MINIMIZED_KEY = "tryonMinimized";
-  const [refetch, setRefetch] = useState(false);
-  const [isMinimized, setIsMinimized] = React.useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem(MINIMIZED_KEY) || "false");
-    } catch {
-      return false;
-    }
-  });
-
-  const taskqueData = localStorage.getItem(TASKS_KEY) || "";
-
-  const pollTimeout = React.useRef();
-  let maxSize = 10 * 1024 * 1024;
+  const maxSize = 10 * 1024 * 1024;
   const proxyUrl = "/apps/virtual-tryon";
 
-  const isGenerating = !anySuccess && (isLoading || anyRunning);
+  const STATE_KEY = "tryonGenerating";
+  const TASK_KEY = "tryon:lastTaskId";
+  const MIN_FLAG = "tryon:minimized";
+  const SESSION_KEY = "tryon:lastSessionId";
+  const RESULT_KEY = "tryon:lastResult"; // persisted final result
 
-  // ========================================= All Constants ===============================================
-
-  const requirements = [
-    "Full body",
-    "Good lighting",
-    "Just you",
-    "No hands in pockets",
-    "Fitted clothes",
-  ];
-
+  const requirements = ["Full body", "Good lighting", "Just you"];
   const loadingSentences = [
     "Taking the piece of clothing…",
     "Putting clothing on person…",
@@ -110,11 +71,105 @@ export function TryOnModal({
     "Creating final look…",
   ];
 
-  const STATE_KEY = "tryonGenerating";
+  const pollConfirm = async (sessionId) => {
+    try {
+      const res = await fetch(
+        `${proxyUrl}?type=confirm&sessionId=${sessionId}`,
+        { method: "POST" },
+      );
+      const data = await res.json();
 
-  // ============================================= Helper Functions =============================================
+      if (data.status === "SUCCESS" && data.fileUrl) {
+        const finalResult = {
+          fileUrl: data.fileUrl,
+          taskId: data.taskId,
+          resultId: data.resultId,
+          status: "SUCCESS",
+        };
 
-  // helper
+        setResult(finalResult);
+        setIsLoading(false);
+        setGlobalGenerating(false);
+
+        // persist result so a fresh page can instantly render it
+        try {
+          localStorage.setItem(RESULT_KEY, JSON.stringify(finalResult));
+          localStorage.removeItem(SESSION_KEY); // no longer pending
+        } catch {}
+
+        // don't auto-unminimize — let the user decide (you can remove this line)
+        // setIsMinimized(false);
+        return;
+      }
+
+      if (data.status === "FAILED") {
+        setError("Failed to generate result. Please try again.");
+        setIsLoading(false);
+        setGlobalGenerating(false);
+        try {
+          localStorage.removeItem(SESSION_KEY);
+        } catch {}
+        return;
+      }
+
+      // PENDING -> poll again
+      pollTimerRef.current = window.setTimeout(
+        () => pollConfirm(sessionId),
+        6000,
+      );
+    } catch {
+      pollTimerRef.current = window.setTimeout(
+        () => pollConfirm(sessionId),
+        8000,
+      );
+    }
+  };
+
+  useEffect(() => {
+    // Restore minimized pill state
+    try {
+      const flag = JSON.parse(localStorage.getItem(MIN_FLAG) || "false");
+      setIsMinimized(!!flag);
+    } catch {}
+
+    // Try to instantly hydrate a finished result
+    try {
+      const saved = localStorage.getItem(RESULT_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed?.fileUrl) {
+          setResult(parsed);
+          setIsLoading(false);
+          setGlobalGenerating(false);
+          return; // we're done, show the result screen
+        }
+      }
+    } catch {}
+
+    // If there is a pending session, go straight to LOADING and poll
+    try {
+      const sessionId = localStorage.getItem(SESSION_KEY);
+      if (sessionId) {
+        setIsLoading(true); // <- forces loading screen, not initial
+        setGlobalGenerating(true);
+        pollConfirm(sessionId);
+      }
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (pollTimerRef.current) window.clearTimeout(pollTimerRef.current);
+    };
+  }, []);
+
+  // keep minimized flag in LS
+  useEffect(() => {
+    try {
+      localStorage.setItem(MIN_FLAG, JSON.stringify(!!isMinimized));
+    } catch {}
+  }, [isMinimized]);
+
   const setGlobalGenerating = React.useCallback((val) => {
     try {
       localStorage.setItem(STATE_KEY, JSON.stringify(!!val));
@@ -124,117 +179,17 @@ export function TryOnModal({
     } catch {}
   }, []);
 
-  const checkTask = async () => {
-    try {
-      // console.log("Called checkTask", taskId);
-      if (!taskId) return;
-      const res = await fetch(`${proxyUrl}?type=confirm&taskId=${taskId}`, {
-        method: "POST",
-        redirect: "manual",
-      });
-      const data = await res.json();
-      const list = data.resultList || [];
-      const allDone = list.every((r) =>
-        ["SUCCESS", "FAILED"].includes(statusOf(r)),
-      );
-      if (!allDone) {
-        setTimeout(() => checkTask(taskId), 6000);
-      }
-    } catch (e) {
-      // console.error("Failed to check task", e);
-    }
-  };
-
-  const pollStatus = async () => {
-    try {
-      // console.log("Called Pool Status", taskId);
-      if (!taskId) return;
-      if (!isCanceled) {
-        const res = await fetch(`${proxyUrl}?type=confirm&taskId=${taskId}`, {
-          method: "POST",
-          redirect: "manual",
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data.error || "Failed to check status");
-        }
-        const list = data.resultList || [];
-        const isCurrectTask = setGeneratedResults(list);
-        // const firstSuccess = list.find((r) => r.status === "SUCCESS");
-        const firstSuccess = list.find(isSuccess);
-        if (firstSuccess) {
-          setAnySuccess(true);
-          setPreviewImage((prev) => prev || firstSuccess.fileUrl);
-          setProgress(100);
-          setIsLoading(false);
-        }
-        const allDone = list.every(
-          (r) => r.status === "SUCCESS" || r.status === "FAILED",
-        );
-        if (!allDone) {
-          pollTimeout.current = setTimeout(() => pollStatus(taskId), 6000);
-        } else {
-          const allFailed =
-            list.length > 0 && list.every((r) => statusOf(r) === "FAILED");
-
-          if (allFailed) {
-            setError("Failed to generate results please try again.");
-
-            // reset back to the previous screen (photo preview + Try button)
-            setAnySuccess(false);
-            setAnyRunning(false);
-            setIsLoading(false);
-            setTaskId(null);
-            localStorage.setItem(TASKS_KEY, "");
-            setGeneratedResults([]);
-            setPreviewImage(null);
-            setPreviewImageId(null);
-            setCurrentIdx(0);
-          }
-
-          // if (data.refunded) {
-          //   setError("Failed to generate results");
-          // }
-          setProgress(100);
-          // setIsLoading(false);
-          setGlobalGenerating(false); // <— finished
-        }
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to check status";
-      setError(msg);
-      setProgress(100);
-      setIsLoading(false);
-    }
-  };
-
-  const statusOf = (r) => (r?.status || "").toUpperCase();
-
-  const isRunning = (r) =>
-    ["CREATED", "RUNNING", "PENDING"].includes(statusOf(r));
-  const isSuccess = (r) => statusOf(r) === "SUCCESS" && !!r?.fileUrl;
-
+  // ------- file handlers -------
   const handleFileUpload = async (file) => {
     try {
-      setError(undefined);
+      setError("");
       const url = URL.createObjectURL(file);
       setUserPhoto(url);
       setSelectedFile(file);
+      setResult(null);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to upload photo";
       setError(msg);
-    }
-  };
-
-  const handleDeleteUserPhoto = () => {
-    setUserPhoto(null);
-    setSelectedFile(null);
-    setIsLoading(false);
-    setSelectedGarmentType("");
-    setGeneratedResults([]);
-    localStorage.setItem(TASKS_KEY, "");
-    if (fileInputRef.current) {
-      fileInputRef.current.value = null;
     }
   };
 
@@ -243,148 +198,67 @@ export function TryOnModal({
       setError("Please upload an image file");
       return;
     }
-
     if (file.size > maxSize) {
       setError(`File size must be less than ${maxSize / 1024 / 1024}MB`);
       return;
     }
-
-    setError(undefined);
+    setError("");
     try {
       await handleFileUpload(file);
-    } catch (err) {
+    } catch {
       setError("Failed to upload file");
     }
   };
 
-  const handleClose = () => {
-    setIsMinimized(false);
-    setIsOpen(false);
+  const handleDeleteUserPhoto = () => {
     setUserPhoto(null);
-    setCurrentIdx(0);
-    setStage(0);
-    setSelected("top");
+    setSelectedFile(null);
     setIsLoading(false);
-    setError(null);
-    setIsCanceled(true);
-    // setTaskId(null);
-    // localStorage.setItem(TASKS_KEY, "");
+    setSelectedGarmentType("");
+    setResult(null);
     if (fileInputRef.current) fileInputRef.current.value = null;
-    if (pollTimeout.current) clearTimeout(pollTimeout.current);
-    setGlobalGenerating(false); // <— ensure button re-enables on close
-    onClose?.();
   };
 
-  const handleMinimize = () => {
+  // helper: minimize without resetting state
+  const minimize = () => {
     setIsMinimized(true);
     setIsOpen(false);
+    try {
+      localStorage.setItem(MIN_FLAG, JSON.stringify(true));
+    } catch {}
   };
 
-  const handleGeneratePreview = async () => {
-    if (!userPhoto || !selectedFile) {
+  // When closing:
+  // - if we have a result, minimize and keep TASK_KEY in LS
+  // - if no result, fully reset/close
+  const handleClose = () => {
+    // If a generation is in-flight, minimize instead of resetting
+    if (isLoading && !result?.fileUrl) {
+      minimize();
+      setGlobalGenerating(true); // keep global "generating" true
+      onClose?.();
       return;
     }
 
-    setGlobalGenerating(true); // <— immediately disable the button outside
-    const formData = new FormData();
-    formData.append("dressImage", garmentImage);
-    formData.append("modelImage", selectedFile);
-    formData.append("category", selectedGarmentType);
-
-    try {
-      progressStartRef.current = Date.now();
-      setStage(0);
-      setProgress(0);
-      setIsLoading(true);
-      setError(null);
-      setPreviewImage(null);
-      setGeneratedResults([]);
-
-      const res = await fetch(`${proxyUrl}?type=create`, {
-        method: "POST",
-        redirect: "manual",
-        body: formData,
-      });
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(
-          data.error || data.message || "Failed to generate preview",
-        );
-      }
-
-      // console.log("Data", data);
-      setIsCanceled(false);
-      setTaskId(data.taskId);
-      setGeneratedResults(data.resultList || []);
-      const updated = data.taskId;
-      localStorage.setItem(TASKS_KEY, updated);
-      setRefetch((prev) => !prev);
-      // setIsMinimized(true);
-      // setIsOpen(false);
-    } catch (err) {
-      const msg =
-        err instanceof Error ? err.message : "Failed to generate preview";
-      setGlobalGenerating(false); // <— on failure
-      setError(msg);
-      setIsLoading(false);
-      // toast({ title: "Error", description: msg, variant: "destructive" });
+    // If we already have a finished result, also keep the pill
+    if (result?.taskId) {
+      minimize();
+      setGlobalGenerating(false);
+      onClose?.();
+      return;
     }
+
+    // Otherwise, fully close & reset
+    setIsOpen(false);
+    setUserPhoto(null);
+    setIsLoading(false);
+    setIsSubmitting(false);
+    setError("");
+    setResult(null);
+    if (fileInputRef.current) fileInputRef.current.value = null;
+    setGlobalGenerating(false);
+    onClose?.();
   };
-
-  // Only SUCCESS images (with a fileUrl) are navigable
-  const successList = React.useMemo(
-    () =>
-      Array.isArray(generatedResults) ? generatedResults.filter(isSuccess) : [],
-    [generatedResults],
-  );
-
-  const handlePreviewImage = React.useCallback(
-    (img) => {
-      setPreviewImage(img?.fileUrl);
-      setPreviewImageId(img?.id);
-
-      const i = successList.findIndex((x) => x.id === img?.id);
-      if (i >= 0) {
-        setCurrentIdx(i);
-        swiperRef.current?.slideTo(i);
-      }
-    },
-    [successList],
-  );
-
-  const syncToIndex = React.useCallback(
-    (i) => {
-      setCurrentIdx(i);
-      const active = successList[i];
-
-      if (active) {
-        setPreviewImageId(active.id);
-        setPreviewImage(active.fileUrl);
-      }
-    },
-    [successList],
-  );
-
-  const handlePrev = React.useCallback(() => {
-    if (successList.length <= 1) return;
-    // console.log("handlePrev clicked....");
-    const nextIdx = (currentIdx - 1 + successList.length) % successList.length;
-    const next = successList[nextIdx];
-    setCurrentIdx(nextIdx);
-    setPreviewImage(next.fileUrl);
-    setPreviewImageId(next.id);
-  }, [successList, currentIdx]);
-
-  const handleNext = React.useCallback(() => {
-    if (successList.length <= 1) return;
-    // console.log("handleNext clicked....");
-    const nextIdx = (currentIdx + 1) % successList.length;
-    const next = successList[nextIdx];
-    setCurrentIdx(nextIdx);
-    setPreviewImage(next.fileUrl);
-    setPreviewImageId(next.id);
-  }, [successList, currentIdx]);
 
   const triggerUpload = (e) => {
     e?.preventDefault?.();
@@ -392,67 +266,203 @@ export function TryOnModal({
     fileInputRef.current?.click();
   };
 
-  const getActiveImage = React.useCallback(() => {
-    if (!Array.isArray(successList) || !successList.length) return null;
-    if (previewImageId) {
-      return (
-        successList.find((x) => x.id === previewImageId) ??
-        successList[currentIdx]
-      );
-    }
-    return successList[currentIdx];
-  }, [successList, previewImageId, currentIdx]);
-
-  const handleCopyActiveUrl = React.useCallback(async () => {
-    const active = getActiveImage();
-    if (!active?.fileUrl) return;
+  // ------- fetch previous result by taskId (DB) -------
+  // expects server route: POST /apps/virtual-tryon?type=result&taskId=...
+  // responds: { fileUrl, resultId } (and OK if found)
+  const fetchPreviousResult = async (taskId) => {
+    if (!taskId) return;
     try {
-      // await navigator.clipboard.writeText(active.fileUrl);
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(active.fileUrl);
-      } else {
-        // Fallback: create a temporary input
-        const el = document.createElement("input");
-        el.value = active.fileUrl;
-        document.body.appendChild(el);
-        el.select();
-        document.execCommand("copy");
-        document.body.removeChild(el);
-      }
-      setCopiedUrl(true);
-      setTimeout(() => setCopiedUrl(false), 1500);
-    } catch (e) {
-      // console.error("Copy failed:", e);
-    }
-  }, [getActiveImage]);
-
-  const handleDownloadActive = React.useCallback(async () => {
-    const active = getActiveImage();
-    if (!active?.fileUrl) return;
-    const url = active.fileUrl;
-    try {
-      // Try fetching to ensure 'download' works reliably with CORS; fallback to open.
-      const res = await fetch(url, {
-        mode: "cors",
-        credentials: "omit",
-        referrerPolicy: "no-referrer",
+      setIsLoading(true);
+      const res = await fetch(`${proxyUrl}?type=result&taskId=${taskId}`, {
+        method: "POST",
+        redirect: "manual",
       });
-      const blob = await res.blob();
-      const a = document.createElement("a");
-      const objectUrl = URL.createObjectURL(blob);
-      a.href = objectUrl;
-      a.download = `tryon-${active.id ?? currentIdx}.jpg`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(objectUrl);
-    } catch (e) {
-      // console.warn("Fetch download failed, opening in new tab:", e);
-      window.open(url, "_blank", "noopener,noreferrer");
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to fetch previous result");
+      }
+      if (!data?.fileUrl) {
+        throw new Error("No image found for this task");
+      }
+      setResult({
+        fileUrl: data.fileUrl,
+        taskId: taskId,
+        resultId: data.resultId || `${taskId}_1`,
+        status: "SUCCESS",
+      });
+      setError("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to fetch result");
+    } finally {
+      setIsLoading(false);
     }
-  }, [getActiveImage, currentIdx]);
+  };
 
-  // small centered popup (desktop)
+  // when minimized pill is opened, restore last task and pull from DB
+  const reopenFromMinimized = async () => {
+    setIsMinimized(false);
+    setIsOpen(true);
+
+    // If we already have a saved result, render it immediately
+    try {
+      const saved = localStorage.getItem(RESULT_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed?.fileUrl) {
+          setResult(parsed);
+          setIsLoading(false);
+          setGlobalGenerating(false);
+          return;
+        }
+      }
+    } catch {}
+
+    // Otherwise if still pending, show loading and poll
+    const sessionId = localStorage.getItem(SESSION_KEY);
+    if (sessionId && !result?.fileUrl) {
+      setIsLoading(true);
+      setGlobalGenerating(true);
+
+      try {
+        const res = await fetch(
+          `${proxyUrl}?type=result&sessionId=${sessionId}`,
+          { method: "POST" },
+        );
+        if (res.ok) {
+          const { fileUrl, resultId, taskId } = await res.json();
+          const finalResult = { fileUrl, resultId, taskId, status: "SUCCESS" };
+          setResult(finalResult);
+          setIsLoading(false);
+          setGlobalGenerating(false);
+          localStorage.setItem(RESULT_KEY, JSON.stringify(finalResult));
+          localStorage.removeItem(SESSION_KEY);
+          return;
+        }
+      } catch {
+        /* ignore */
+      }
+
+      // Keep polling if not ready
+      pollConfirm(sessionId);
+    }
+  };
+
+  // ------- API (single-shot) -------
+  const handleGeneratePreview = async () => {
+    if (!userPhoto || !selectedFile) return;
+
+    // setGlobalGenerating(true);
+    setGlobalGenerating(false); // not generating yet (only submitting)
+    setStage(0);
+    setProgress(0);
+    // setIsLoading(true);
+    setIsSubmitting(true); // <-- show button spinner
+    setError("");
+    setResult(null);
+
+    const formData = new FormData();
+    formData.append("dressImage", garmentImage); // URL or File
+    formData.append("modelImage", selectedFile); // File
+    formData.append("category", selectedGarmentType);
+
+    try {
+      const res = await fetch(`${proxyUrl}?type=createSession`, {
+        method: "POST",
+        redirect: "manual",
+        body: formData,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to start session");
+
+      const { sessionId } = data;
+
+      // Persist session so it survives navigation, but DON'T minimize.
+      localStorage.setItem(SESSION_KEY, sessionId);
+      setIsSubmitting(false); // stop button spinner
+      setIsLoading(true); // <-- enter loading screen
+      setGlobalGenerating(true);
+
+      // Keep the modal open and show the loading UI.
+      pollConfirm(sessionId);
+    } catch (err) {
+      console.log("Error while Generating:", err);
+
+      setGlobalGenerating(false);
+      setError(err instanceof Error ? err.message : "Failed to start session");
+      setIsLoading(false);
+      setIsSubmitting(false);
+    }
+  };
+
+  // ------- progress loop -------
+  React.useEffect(() => {
+    const loading = isLoading && !result?.fileUrl;
+    if (loading) {
+      if (!progressStartRef.current) progressStartRef.current = Date.now();
+      const tick = setInterval(() => {
+        const elapsed = Date.now() - progressStartRef.current;
+        const pct = Math.min(90, (elapsed / TARGET_TO_90_MS) * 90);
+        setProgress(pct);
+        const nextStage = Math.max(
+          0,
+          Math.min(SEGMENTS - 1, Math.floor(elapsed / SEGMENT_MS)),
+        );
+        setStage(nextStage);
+      }, 100);
+      return () => clearInterval(tick);
+    } else {
+      progressStartRef.current = null;
+      if (result?.fileUrl) {
+        setProgress(100);
+        setStage(SEGMENTS - 1);
+        const t = setTimeout(() => setProgress(0), 800);
+        return () => clearTimeout(t);
+      }
+    }
+  }, [isLoading, result?.fileUrl]);
+
+  // modal open from outside (always open fresh input modal, hide minimized pill)
+  React.useEffect(() => {
+    const handleOpen = (e) => {
+      // ensure minimized pill disappears
+
+      // stop any polling loop
+      if (pollTimerRef.current) {
+        window.clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+
+      setIsMinimized(false);
+      setGlobalGenerating(false);
+      try {
+        localStorage.setItem(MIN_FLAG, JSON.stringify(false));
+        localStorage.removeItem(SESSION_KEY);
+        localStorage.removeItem(RESULT_KEY);
+        localStorage.removeItem(TASK_KEY);
+      } catch {}
+
+      // open modal in a clean state
+      setIsOpen(true); // we want to open fresh
+      setIsMinimized(false);
+      setIsLoading(false);
+      setError("");
+      setResult(null);
+      setUserPhoto(null);
+      setSelectedFile(null);
+      setProgress(0);
+      setStage(0);
+      if (fileInputRef.current) fileInputRef.current.value = null;
+
+      // set garment type (if provided)
+      const detail = e?.detail || {};
+      setSelectedGarmentType(detail.garmentType || initialGarmentType);
+    };
+
+    document.addEventListener("openTryOnModal", handleOpen);
+    return () => document.removeEventListener("openTryOnModal", handleOpen);
+  }, [initialGarmentType, isNew]);
+
+  // ------- share / download -------
   const openPopup = (url, name = "share") => {
     const w = 640,
       h = 640;
@@ -470,15 +480,12 @@ export function TryOnModal({
   };
 
   const getShareLinks = React.useCallback(() => {
-    const active = getActiveImage();
-    if (!active?.fileUrl) return [];
-
-    const url = active.fileUrl;
+    if (!result?.fileUrl) return [];
+    const url = result.fileUrl;
     const encodedUrl = encodeURIComponent(url);
     const text = "Check out my virtual try-on!";
     const encodedText = encodeURIComponent(text);
     const subject = encodeURIComponent("Virtual Try-On");
-
     return [
       {
         key: "whatsapp",
@@ -529,19 +536,16 @@ export function TryOnModal({
         iconLink: "https://cdn-icons-png.flaticon.com/512/732/732200.png",
       },
     ];
-  }, [getActiveImage]);
+  }, [result]);
 
-  // remove handleNativeShare and add this:
   const handleShareClick = async (e) => {
     e?.stopPropagation?.();
-
-    const active = getActiveImage();
-    if (!active?.fileUrl) return;
+    if (!result?.fileUrl) return;
 
     const shareData = {
       title: "Virtual Try-On",
       text: "Check out my virtual try-on!",
-      url: active.fileUrl,
+      url: result.fileUrl,
     };
 
     const supportsWebShare =
@@ -555,21 +559,15 @@ export function TryOnModal({
     ) {
       try {
         await navigator.share(shareData);
-        // success or user completed share – stop here (no popup)
         return;
       } catch (err) {
-        // If the user cancels, do nothing (don’t open fallback)
         if (err?.name === "AbortError") return;
-        // Otherwise fall through to fallback
       }
     }
-
-    // Fallback (no Web Share, insecure context, or non-abort error)
     setShareOpen(true);
   };
 
   const handleShareTo = React.useCallback((href) => {
-    // mobile deep links (WhatsApp/Telegram) should open in the same tab
     if (/wa\.me|t\.me/.test(href)) {
       window.location.href = href;
     } else {
@@ -578,189 +576,86 @@ export function TryOnModal({
     setShareOpen(false);
   }, []);
 
-  //  ======================================= ALL  useEffects ===============================================
-
-  useEffect(() => {
-    checkTask();
-    pollStatus();
-  }, [taskId]);
-
-  React.useEffect(() => {
-    localStorage.setItem(MINIMIZED_KEY, JSON.stringify(isMinimized));
-  }, [isMinimized]);
-
-  useEffect(() => {
-    // console.log("LocalStorage Task", taskqueData);
-    if (taskqueData) {
-      setTaskId(taskqueData);
-      pollStatus();
-      checkTask();
+  const handleDownloadActive = React.useCallback(async () => {
+    if (!result?.fileUrl) return;
+    const url = result.fileUrl;
+    try {
+      const res = await fetch(url, {
+        mode: "cors",
+        credentials: "omit",
+        referrerPolicy: "no-referrer",
+      });
+      const blob = await res.blob();
+      const a = document.createElement("a");
+      const objectUrl = URL.createObjectURL(blob);
+      a.href = objectUrl;
+      a.download = `tryon-${result.resultId ?? "1"}.jpg`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(objectUrl);
+    } catch {
+      window.open(url, "_blank", "noopener,noreferrer");
     }
-  }, [refetch, taskqueData]);
+  }, [result]);
 
-  React.useEffect(() => {
-    if (swiperRef.current && swiperRef.current.activeIndex !== currentIdx) {
-      swiperRef.current.slideTo(currentIdx, 0);
-    }
-  }, [currentIdx]);
-
-  // make sure initial preview indexes are set once results arrive
-  React.useEffect(() => {
-    if (!previewImageId && successList.length) {
-      setPreviewImage(successList[0].fileUrl);
-      setPreviewImageId(successList[0].id);
-      setCurrentIdx(0);
-    }
-  }, [successList, previewImageId]);
-
-  useEffect(() => {
-    const hasList =
-      Array.isArray(generatedResults) && generatedResults.length > 0;
-    const anySuccess = hasList && generatedResults.some(isSuccess);
-    const anyRunning = hasList && generatedResults.some(isRunning);
-    setAnySuccess(anySuccess);
-    setAnyRunning(anyRunning);
-  }, [
-    generatedResults?.[0]?.status,
-    generatedResults?.[1]?.status,
-    generatedResults?.[2]?.status,
-    generatedResults?.[3]?.status,
-  ]);
-
-  React.useEffect(() => {
-    if (!successList.length) return;
-
-    // If current preview doesn't match a success item, snap to the first
-    const byId = successList.findIndex((r) => r.id === previewImageId);
-    if (byId >= 0) {
-      setCurrentIdx(byId);
-      return;
-    }
-
-    const byUrl = successList.findIndex((r) => r.fileUrl === previewImage);
-    if (byUrl >= 0) {
-      setCurrentIdx(byUrl);
-      setPreviewImageId(successList[byUrl].id);
-      return;
-    }
-
-    // default to first success
-    setCurrentIdx(0);
-    setPreviewImage(successList[0].fileUrl);
-    setPreviewImageId(successList[0].id);
-  }, [successList, previewImage, previewImageId]);
-
-  // listen for the open event
-  React.useEffect(() => {
-    const handleOpen = (e) => {
-      console.log("Open triggered.....");
-      localStorage.setItem(TASKS_KEY, "");
-      setTaskId(null);
-      setIsOpen(true);
-      setGeneratedResults([]);
-      setError(undefined);
-      setIsCanceled(true);
-      const detail = e?.detail || {};
-      setSelectedGarmentType(detail.garmentType || initialGarmentType);
-    };
-
-    document.addEventListener("openTryOnModal", handleOpen);
-    return () => document.removeEventListener("openTryOnModal", handleOpen);
-  }, [initialGarmentType, isNew]);
-
-  // PROGRESS INTERVAL USEEFFECT
-  React.useEffect(() => {
-    const loading = !anySuccess && (isLoading || anyRunning);
-    if (loading) {
-      if (!progressStartRef.current) progressStartRef.current = Date.now();
-
-      const tick = setInterval(() => {
-        const elapsed = Date.now() - progressStartRef.current;
-
-        // progress: 0→90 over 50s (your existing logic)
-        const pct = Math.min(90, (elapsed / TARGET_TO_90_MS) * 90);
-        setProgress(pct);
-
-        // NEW: stage 0..4, updates every 10s (10000ms)
-        const nextStage = Math.max(
-          0,
-          Math.min(SEGMENTS - 1, Math.floor(elapsed / SEGMENT_MS)),
-        );
-        setStage(nextStage);
-      }, 100);
-
-      return () => clearInterval(tick);
-    } else {
-      // done: snap to 100 and gently reset
-      progressStartRef.current = null;
-      setProgress(100);
-      setStage(SEGMENTS - 1); // show the last sentence when finishing
-      const t = setTimeout(() => setProgress(0), 800);
-      return () => clearTimeout(t);
-    }
-  }, [isLoading, anyRunning, anySuccess, SEGMENT_MS]);
-
-  React.useEffect(() => {
-    setGlobalGenerating(isGenerating);
-  }, [isGenerating, setGlobalGenerating]);
-
-  // ======================================= NEW BODY CONTENT WITH MOBILE SCREENS =======================================
-
+  // ------- render sections -------
   let bodyContent;
-  if (!userPhoto && !taskId) {
-    // 1️⃣ INITIAL: show sample model + upload button
+  if (!userPhoto && !result && !isLoading) {
+    // initial
     bodyContent = (
-      <section className="w-full flex flex-col items-center relative md:p-5">
+      <section className="ai-initial">
         <button
           onClick={handleClose}
-          className="absolute top-3 left-3 md:right-3 text-netral-600 bg-white rounded-full p-1.5 block md:hidden"
+          className="ai-initial__mobileClose"
           aria-label="Close"
         >
-          <ChevronDown size={18} />
+          <div style={{ display: "flex", justifyContent: "center", width: 30 }}>
+            <ChevronDown size={18} />
+          </div>
         </button>
 
-        <div className="mt-6 md:mt-0 text-center leading-[0.95]">
-          <h1 className="text-[50px] md:text-[55px] space-x-2 !font-black !font-inter !tracking-tight !text-black">
-            Try
-            <span className="block md:inline md:ml-2">it on</span>
+        <div className="ai-initial__titleWrap">
+          <h1 className="ai-initial__title">
+            Try <span>it on</span>
           </h1>
         </div>
 
-        <div className="relative  w-full max-w-[520px] md:!h-72  ">
+        <div className="ai-initial__imgWrap">
           <img
             src="https://aiframeimages.s3.eu-north-1.amazonaws.com/uploads/1755117845063-bg-removed.jpg"
             alt="Model in red dress"
-            className=" !h-[calc(100vh-450px)] md:!h-72   !w-auto !mx-auto !object-contain mix-blend-multiply"
+            className="ai-initial__img"
           />
         </div>
-        {/* images  */}
-        <div className="mt-1 w-full flex flex-col items-center">
-          <p className="!text-black  text-xl font-bold">Photo requirements:</p>
 
-          <ul className=" flex flex-wrap justify-center gap-x-4 gap-y-2 text-xs sm:text-sm !text-black">
+        <div className="ai-initial__reqWrap">
+          <p className="ai-initial__reqTitle">Photo requirements:</p>
+          <ul className="ai-initial__reqList">
             {requirements.map((req) => (
-              <li key={req} className="flex items-center gap-2">
-                <CircleCheck className="size-4 text-neutral-700" />
-                <span className="font-medium text-neutral-700">{req}</span>
+              <li key={req} className="ai-initial__reqItem">
+                <CircleCheck className="ai-icon ai-icon--neutral" />
+                <span className="ai-initial__reqText">{req}</span>
               </li>
             ))}
           </ul>
+          <p className="ai-initial__reqPara">
+            Similar outfit type: wear clothing with a similar sleeve length &
+            fit to the item you want to try on for the most accurate result
+          </p>
         </div>
 
-        {/* CTA */}
-        <div className="mt-3 w-full">
-          <button
-            onClick={triggerUpload}
-            className="flex items-center justify-center gap-2 px-8 sm:px-12 py-2.5 rounded-full bg-black text-neutral-200 text-sm sm:text-base font-medium hover:opacity-90 w-9/12 mx-auto active:opacity-85 transition"
-          >
+        <div className="ai-initial__cta">
+          <button onClick={triggerUpload} className="ai-initial__uploadBtn">
             <svg
               xmlns="http://www.w3.org/2000/svg"
               width="22"
               height="22"
               viewBox="0 0 24 24"
+              aria-hidden="true"
             >
-              <g fill="none" fill-rule="evenodd">
-                <path d="m12.593 23.258l-.011.002l-.071.035l-.02.004l-.014-.004l-.071-.035q-.016-.005-.024.005l-.004.01l-.017.428l.005.02l.01.013l.104.074l.015.004l.012-.004l.104-.074l.012-.016l.004-.017l-.017-.427q-.004-.016-.017-.018m.265-.113l-.013.002l-.185.093l-.01.01l-.003.011l.018.43l.005.012l.008.007l.201.093q.019.005.029-.008l.004-.014l-.034-.614q-.005-.018-.02-.022m-.715.002a.02.02 0 0 0-.027.006l-.006.014l-.034.614q.001.018.017.024l.015-.002l.201-.093l.01-.008l.004-.011l.017-.43l-.003-.012l-.01-.01z" />
+              <g fill="none">
+                <path d="m12.593 23.258-.011.002-.071.035-.02.004-.014-.004-.071-.035q-.016-.005-.024.005l-.004.01-.017.428.005.02.01.013.104.074.015.004.012-.004.104-.074.012-.016.004-.017-.017-.427q-.004-.016-.017-.018m.265-.113-.013.002-.185.093-.01.01-.003.011.018.43.005.012.008.007.201.093q.019.005.029-.008l.004-.014-.034-.614q-.005-.018-.02-.022m-.715.002a.02.02 0 0 0-.027.006l-.006.014-.034.614q.001.018.017.024l.015-.002.201-.093.01-.008.004-.011.017-.43-.003-.012-.01-.01z" />
                 <path
                   fill="currentColor"
                   d="M9 2a2 2 0 0 0-2 2v2h2V4h11v11h-2v2h2a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2zM4 7a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"
@@ -771,63 +666,35 @@ export function TryOnModal({
           </button>
         </div>
 
-        {/* Footer */}
-        <div className="mt-2 flex flex-col items-center px-5 pb-5">
-          <p className="text-xs text-neutral-500 text-center max-w-[520px]">
+        <div className="ai-initial__footer">
+          <p className="ai-initial__smallNote">
             Only upload a photo of yourself. Generative AI is experimental and
-            can make mistakes. See our
-            <a
-              href="https://aiframe-v2.vercel.app/privacy-policy"
-              className="underline font-medium"
-            >
+            can make mistakes. See our{" "}
+            <a href="https://www.aiframe.app/privacy-policy/virtual-fitting-room" id="ai-link">
               usage policy
-            </a>
+            </a>{" "}
             for details.
           </p>
         </div>
       </section>
     );
-  } else if (!anySuccess && (isLoading || anyRunning || !!taskId)) {
+  } else if (isLoading && !result?.fileUrl) {
+    // generating (show server error inline if present)
     bodyContent = (
-      <section className="relative w-full h-dvh md:!h-[600px]  mx-auto overflow-hidden bg-white">
-        <div className="absolute inset-x-0 top-0 h-[3px] bg-transparent overflow-hidden z-50">
-          <div className="absolute inset-0 bg-transparent" />
+      <section className="ai-stage">
+        <div className="ai-stage__topline">
+          <div className="ai-stage__toplineInner" />
           <div
-            className="h-full"
-            style={{
-              width: `${Math.max(0, Math.min(100, progress))}%`,
-              background:
-                "linear-gradient(90deg,#FFD6A1 0%, #FFB668 50%, #FF8A1D 100%)",
-              boxShadow: "0 0 10px rgba(255,138,29,0.35)",
-            }}
+            className="ai-stage__topfill"
+            style={{ width: `${Math.max(0, Math.min(100, progress))}%` }}
           />
         </div>
 
-        <div className="absolute inset-0">
-          <div className="absolute inset-0 bg-gradient-to-b from-[#F7F8FA] via-white to-white" />
-          <div
-            className="absolute -top-14 left-1/2 -translate-x-1/2 w-[420px] h-[240px] rounded-full bg-soft-glow opacity-90"
-            style={{
-              background:
-                "radial-gradient(60% 60% at 50% 50%, rgba(255,206,150,0.35) 0%, rgba(255,180,110,0.20) 40%, rgba(255,255,255,0) 70%)",
-            }}
-          />
+        <div className="ai-stage__bg">
+          <div className="ai-stage__bgGradient" />
+          <div className="ai-stage__bgGlow" />
           <button
-            className="absolute top-5  md:!block  !hidden right-5 z-30 border font-semibold rounded-full border-gray-400 !text-gray-800 px-4 py-2 text-[13px] leading-none"
-            onClick={handleMinimize}
-          >
-            Minimize
-          </button>
-
-          {/* <button
-            className="absolute top-5 right-5 z-30 b text-sm leading-none"
-             onClick={handleClose}
-          >
-            <X size={18} />
-          </button> */}
-
-          <button
-            className="absolute top-5 w-fit !right-5 md:!left-5 z-30 border font-semibold rounded-full border-gray-400 !text-gray-800 px-4 py-2 text-[13px] leading-none"
+            className="ai-stage__pillBtn ai-stage__pillBtn--cancel"
             onClick={handleClose}
           >
             Cancel
@@ -835,14 +702,22 @@ export function TryOnModal({
         </div>
 
         <button
-          onClick={handleMinimize}
-          className="absolute top-5 left-3 md:right-3 text-netral-600 bg-white rounded-full p-1.5 block md:hidden z-50"
+          className="ai-stage__pillBtn ai-stage__pillBtn--cancel"
+          onClick={minimize} // was handleClose
+        >
+          Minimize
+        </button>
+
+        <button
+          // onClick={handleClose}
+          onClick={minimize} // was handleClose
+          className="ai-stage__mobileMin"
           aria-label="Close"
         >
           <ChevronDown size={18} />
         </button>
 
-        <div className="relative h-full flex flex-col items-center justify-center px-8 gap-4">
+        <div className="ai-stage__center">
           <SparkleProgressAnimation
             loadingTime={50000}
             isLoading={isLoading}
@@ -858,134 +733,93 @@ export function TryOnModal({
             loop={false}
             hideCursorWhileTyping={false}
           />
+          {error ? (
+            <div className="ai-prep__error" style={{ marginTop: 12 }}>
+              <CircleAlert size={18} className="ai-prep__errorText" />
+              <p className="ai-prep__errorText">{error}</p>
+            </div>
+          ) : (
+            <p className="ai-stage__center_note">
+              Your look is being created — this may take 1–3 minutes. Feel free
+              to keep shopping while we get it ready.
+            </p>
+          )}
         </div>
 
-        <div className="absolute bottom-2 left-0 right-0 px-5 w- mx-auto pb-5">
-          <p className="text-[11px] text-center text-[#9aa0a6] leading-tight">
+        <div className="ai-stage__footer">
+          <p className="ai-stage__footerText">
             Generative AI can make mistakes. <br /> Fit and appearance won’t be
             exact.
           </p>
         </div>
       </section>
     );
-  } else if (anySuccess) {
-    // 3️⃣ RESULTS: show generated preview + controls
+  } else if (result?.fileUrl) {
+    // single result (NO slider, NO thumbs)
     bodyContent = (
-      <div className="flex flex-col gap-0 size-full">
-        <div className="hidden md:!flex !items-center justify-between h-14 w-full z-20 px-5 mt-5 md:mt-0">
-          {/* button to generate other images */}
+      <div className="ai-results">
+        <div className="ai-results__topbar">
           <button
             onClick={handleDeleteUserPhoto}
-            className="self-start h-fit w-fit z-50 !text-black !hidden md:!flex !mt-4"
+            className="ai-results__backBtnDesktop"
+            title="Back"
+            aria-label="Back"
           >
             <ArrowLeft size={20} />
           </button>
+
           <button
             aria-label="Close"
             onClick={handleClose}
             title="Try another Clothes"
-            className="bg-[#D5D5D5]/40 backdrop-blur-md text-[#737373] rounded-full p-1.5 !hidden md:!flex"
+            className="ai-results__closeBtnDesktop"
           >
-            <X size={16} className="!text-black" />
+            <X size={16} />
           </button>
         </div>
+
         <button
-          aria-label="Close"
           onClick={handleClose}
-          className="absolute top-3 left-3 !text-black bg-white rounded-full p-1.5 !block md:!hidden z-50"
+          className="ai-initial__mobileClose"
+          aria-label="Close"
         >
-          <ChevronDown size={18} />
+          <div style={{ display: "flex", justifyContent: "center", width: 30 }}>
+            <ChevronDown size={18} />
+          </div>
         </button>
 
-        <div className="h-[calc(100dvh-180px)] md:!h-[300px] 2xl:!h-[400px] w-full bg-neutral-100/70 relative overflow-hidden">
-          <Swiper
-            slidesPerView={1}
-            speed={300}
-            resistanceRatio={0.65}
-            initialSlide={currentIdx}
-            onSwiper={(sw) => (swiperRef.current = sw)}
-            onSlideChange={(sw) => syncToIndex(sw.activeIndex)}
-            preventClicks={false}
-            preventClicksPropagation={false}
-            className="h-full"
-          >
-            {successList?.map((img, idx) => (
-              <SwiperSlide key={img.id ?? idx} className="h-full">
-                <div className="basis-full shrink-0 grow-0 h-full flex items-center justify-center">
-                  <img
-                    src={img.fileUrl}
-                    className="w-full h-full object-contain"
-                  />
-                </div>
-              </SwiperSlide>
-            ))}
-          </Swiper>
+        <div className="ai-results__viewer">
+          <div className="ai-results__slide">
+            <img
+              src={result.fileUrl}
+              className="ai-results__slideImg"
+              alt="Virtual try-on result"
+            />
+          </div>
 
-          {/* Prev / Next buttons */}
-          <button
-            className="bg-[#D5D5D5]/40 backdrop-blur-md text-[#737373] !z-50 absolute p-1.5 top-[50%] left-4 rounded-full"
-            onClick={() => swiperRef.current?.slidePrev()}
-            disabled={successList?.length < 2}
-            aria-label="Previous result"
-          >
-            <ChevronLeft size={17} />
-          </button>
-
-          <button
-            className="bg-[#D5D5D5]/40 backdrop-blur-md text-[#737373] !z-50 absolute p-1.5 top-[50%] right-4 rounded-full"
-            onClick={() => swiperRef.current?.slideNext()}
-            disabled={successList?.length < 2}
-            aria-label="Next result"
-          >
-            <ChevronRight size={17} />
-          </button>
-
-          {/* Counter */}
-          <button className="absolute right-3 text-[#737373] px-3 text-xs py-1.5 top-3 h-fit w-fit bg-[#D5D5D5]/30 rounded-full p-0.5 z-50">
-            {successList?.length
-              ? `${currentIdx + 1} / ${successList?.length}`
-              : `0 / 0`}
-          </button>
-
-          {/* Controls overlay (share / download) */}
-          <div className="absolute bottom-3 right-3 z-[100] pointer-events-auto">
-            <div
-              className="relative rounded-full shadow-md border border-black/5 backdrop-blur-lg"
-              style={{
-                background:
-                  "linear-gradient(135deg, rgba(255,255,255,0.92) 0%, rgba(246,246,246,0.78) 100%)",
-                backdropFilter: "blur(8px)",
-                WebkitBackdropFilter: "blur(8px)",
-              }}
-            >
-              <div className="flex items-center gap-1.5 px-1.5 py-1.5">
-                {/* Share */}
+          <div className="ai-results__controls">
+            <div className="ai-controls">
+              <div className="ai-controls__row">
                 <button
                   type="button"
                   onMouseDown={(e) => e.stopPropagation()}
-                  // onClick={
-                  //   shareOpen ? () => setShareOpen(false) : handleNativeShare
-                  // }
-
                   onClick={
                     shareOpen ? () => setShareOpen(false) : handleShareClick
                   }
-                  className="p-1.5 rounded-full hover:bg-black/5 active:bg-black/10 transition"
+                  className="ai-iconBtn"
                   title="Share"
                   aria-label="Share"
                 >
                   <Share2 size={16} />
                 </button>
 
-                {/* Divider */}
-                <div className="w-px h-5 bg-black/10" />
+                <div className="ai-controls__divider" />
 
-                {/* Download */}
                 <button
                   type="button"
                   onMouseDown={(e) => e.stopPropagation()}
                   onClick={handleDownloadActive}
-                  className="p-1.5 rounded-full hover:bg-black/5 active:bg-black/10 transition"
+                  className="ai-iconBtn"
                   title="Download image"
                   aria-label="Download image"
                 >
@@ -993,29 +827,28 @@ export function TryOnModal({
                 </button>
               </div>
 
-              {/* Share menu (fallback for devices without Web Share API) */}
               {shareOpen && (
                 <div
-                  className="absolute right-0 bottom-12 z-[110] w-[240px] md:!w-[350px] rounded-xl border border-black/5 bg-white backdrop-blur-md shadow-lg p-2"
+                  className="ai-shareMenu"
                   onMouseDown={(e) => e.stopPropagation()}
                   onClick={(e) => e.stopPropagation()}
                 >
-                  <div className="!grid !grid-cols-3 md:!grid-cols-4 gap-2">
+                  <div className="ai-shareMenu__grid">
                     {getShareLinks().map((p) => (
                       <button
                         key={p.key}
                         type="button"
                         onClick={() => handleShareTo(p.href)}
-                        className="  p-2 flex border border-gray-200 hover:bg-gray-100 rounded-md justify-center w-full items-center flex-col   hover:bg-black/5 active:bg-black/10 truncate"
+                        className="ai-shareMenu__item"
+                        title={p.label}
+                        aria-label={p.label}
                       >
                         <img
                           src={p.iconLink}
                           alt={p.label}
-                          className="  !h-6 md:!h-8  w-auto "
+                          className="ai-shareMenu__icon"
                         />
-                        <p className="  text-[10px]  md:text-[11px]  text-gray-500 font-semibold">
-                          {p.label}
-                        </p>{" "}
+                        <p className="ai-shareMenu__label">{p.label}</p>
                       </button>
                     ))}
                   </div>
@@ -1025,97 +858,56 @@ export function TryOnModal({
           </div>
         </div>
 
-        <h4 className="text-sm mt-4 font-semibold text-[#868686] px-4">
-          <span className="!text-black">AI</span> Generated Results
+        <h4 className="ai-results__headline">
+          <span className="ai-text-black">AI</span> Generated Result
         </h4>
-
-        <div className="my-4 !grid !grid-cols-4 gap-1 sm:gap-2 w-full px-4 !h-20 sm:!h-fit">
-          {generatedResults.map((img, idx) => {
-            const running = isRunning(img);
-            const success = isSuccess(img);
-            const isActive = previewImageId === img?.id;
-
-            return (
-              <div
-                key={img?.id ?? idx}
-                className={`relative rounded-lg !overflow-hidden cursor-pointer !border-2 size-full sm:size-auto ${isActive ? " !border-black !p-0.5" : " !border-transparent !p-0.5"}`}
-                onClick={() => success && handlePreviewImage(img)}
-              >
-                <img
-                  src={success ? img.fileUrl : userPhoto}
-                  className="max-h-32 !h-24 sm:!min-h-32  w-full object-cover rounded-lg"
-                />
-                {running && (
-                  <div className="absolute inset-0 bg-white/40 rounded-md backdrop-blur-sm flex justify-center items-center">
-                    <LoaderCircle className="animate-spin !text-black" />
-                  </div>
-                )}
-                {!running && !success && (
-                  <div className="absolute bottom-1 right-1 text-[10px] px-2 py-0.5 bg-red-600 text-white rounded">
-                    Failed
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-
-        {/* <div
-          className="block md:!hidden w-full mb-2"
-          onClick={handleDeleteUserPhoto}
-        >
-          <button className="rounded-full bg-black hover:bg-opacity-90 text-neutral-200 w-11/12 mx-auto px-6 gap-2 flex justify-center items-center py-2.5 mt-3 !text-sm ">
-            <RefreshCcw size={15} /> Generate New Results
-          </button>
-        </div> */}
       </div>
     );
   } else {
+    // prep (user photo selected, not yet generating)
     bodyContent = (
-      <div className="flex flex-col gap-5  bg-[#EDEFF2] md:bg-white">
-        <div className=" flex justify-between items-center  mt-3 md:mt-5 px-4">
+      <div className="ai-prep">
+        <div className="ai-prep__topbar">
           <button
             onClick={handleDeleteUserPhoto}
-            className="self-start h-fit w-fit z-50 !text-black"
+            className="ai-prep__backBtn"
+            aria-label="Back"
           >
             <ArrowLeft />
           </button>
 
           <button
-            className="w-fit px-4 gap-2 flex justify-center items-center py-2.5 mt-3 rounded-md text-sm bg-neutral-200/80 text-neutral-600 hover:bg-neutral-200"
+            className="ai-prep__uploadBtn"
             onClick={triggerUpload}
+            aria-label="Upload another photo"
           >
             <Upload size={15} />
           </button>
         </div>
-        <div className="relative flex justify-center items-center h-[calc(100dvh-250px)] md:!h-[330px]  2xl:h-[480px] w-screen md:w-full bg-neutral-100/70 backdrop-blur-sm">
+
+        <div className="ai-prep__viewer">
           {error && (
-            <div className="absolute flex flex-col gap-2 justify-center items-center h-full w-screen md:w-full object-contain bg-white/90">
-              <CircleAlert size={30} className="text-red-700" />
-              <p className="text-red-700">{error}</p>
+            <div className="ai-prep__error">
+              <CircleAlert size={30} className="ai-prep__errorText" />
+              <p className="ai-prep__errorText">{error}</p>
             </div>
           )}
-          <img
-            src={userPhoto}
-            className="h-full w-screen md:w-full object-contain"
-          />
+          <img src={userPhoto} className="ai-prep__img" alt="Uploaded user" />
         </div>
-        <div className="flex flex-col !items-center !justify-center md:items-start gap-3 mt-3 px-5 w-full">
-          <p className="text-xs text-neutral-700 font-medium !text-center ">
+
+        <div className="ai-prep__hintWrap">
+          <p className="ai-prep__hintText">
             {selected === "top"
               ? "Use a photo with similar neckline & sleeve length."
               : "Choose a photo with legs visible & similar waist/length."}
           </p>
-          <div className="flex justify-center gap-2 w-full mx-auto">
+
+          <div className="ai-prep__options">
             {options.map((option) => (
               <button
                 key={option.value}
                 onClick={() => setSelected(option.value)}
-                className={`px-6 py-1 rounded-lg text-[13px] transition-colors duration-200 ${
-                  selected === option.value
-                    ? "bg-black text-neutral-200"
-                    : "bg-neutral-200/80 text-neutral-600 hover:bg-neutral-200"
-                }`}
+                className={`ai-optionBtn ${selected === option.value ? "ai-optionBtn--active" : ""}`}
               >
                 {option.label}
               </button>
@@ -1123,24 +915,25 @@ export function TryOnModal({
           </div>
         </div>
 
-        <div className="px-5 w-full mb-5">
+        <div className="ai-prep__cta">
           <button
-            disabled={isLoading}
+            // disabled={isLoading}
+            disabled={isSubmitting}
             onClick={handleGeneratePreview}
-            className={`flex items-center justify-center gap-2 px-8 sm:px-12 py-2.5 rounded-full bg-black text-neutral-200 text-sm sm:text-base font-medium hover:opacity-90 w-full active:opacity-85 transition ${isLoading && "opacity-80"}`}
+            className="ai-prep__primaryBtn"
           >
-            {isLoading ? (
-              <Loader className="animate-spin size-5" />
+            {isSubmitting ? (
+              <Loader className="ai-spin ai-size-5" />
             ) : (
               <svg
                 width="24"
                 height="24"
                 viewBox="0 0 24 24"
-                xmlns="http://www.w3.org/2000/svg"
+                aria-hidden="true"
               >
                 <path
                   fill="#e5e5e5"
-                  d="m19 1l-1.26 2.75L15 5l2.74 1.26L19 9l1.25-2.74L23 5l-2.75-1.25M9 4L6.5 9.5L1 12l5.5 2.5L9 20l2.5-5.5L17 12l-5.5-2.5M19 15l-1.26 2.74L15 19l2.74 1.25L19 23l1.25-2.75L23 19l-2.75-1.26"
+                  d="m19 1-1.26 2.75L15 5l2.74 1.26L19 9l1.25-2.74L23 5l-2.75-1.25M9 4 6.5 9.5 1 12l5.5 2.5L9 20l2.5-5.5L17 12l-5.5-2.5M19 15l-1.26 2.74L15 19l2.74 1.25L19 23l1.25-2.75L23 19l-2.75-1.26"
                 />
               </svg>
             )}
@@ -1151,62 +944,93 @@ export function TryOnModal({
     );
   }
 
-  // console.log("TaskId", taskId);
-  // console.log("isSuccess", anySuccess);
-  // console.log("Generated Tasks", generatedResults);
-
-  // ========================================= Component's Return ============================================
-
   return (
     <>
-      {taskId && (
+      {/* Minimized pill */}
+      {isMinimized && (
         <MinimizedTryOn
-          anySuccess={anySuccess}
-          stageText={loadingSentences[stage]}
-          onClickOpen={() => {
-            setIsMinimized(false);
-            setIsOpen(true);
-          }}
+          anySuccess={!!result?.fileUrl}
+          stageText={isLoading ? loadingSentences[stage] : "Tap to open"}
+          onClickOpen={reopenFromMinimized}
           onClose={() => {
+            // stop any polling loop
+            if (pollTimerRef.current) {
+              window.clearTimeout(pollTimerRef.current);
+              pollTimerRef.current = null;
+            }
+            // fully dismiss minimized state and forget last task
             setIsMinimized(false);
-            setTaskId(null);
-            localStorage.setItem(TASKS_KEY, "");
-            handleClose();
+            setGlobalGenerating(false);
+            try {
+              localStorage.removeItem(TASK_KEY);
+              localStorage.setItem(MIN_FLAG, JSON.stringify(false));
+              localStorage.removeItem(SESSION_KEY);
+              localStorage.removeItem(RESULT_KEY);
+            } catch {}
+            // also clear in-memory UI state
+            setIsOpen(false);
+            setResult(null);
+            setUserPhoto(null);
+            setSelectedFile(null);
+            setIsLoading(false);
+            setError("");
+            setProgress(0);
+            setStage(0);
+            if (fileInputRef.current) fileInputRef.current.value = null;
           }}
         />
       )}
 
       <Modal
         isOpen={isOpen}
-        onClose={isGenerating ? handleMinimize : handleClose}
-        onMinimize={handleMinimize}
+        // onClose={isLoading ? handleClose : handleClose}
+        onClose={handleClose}
         className={``}
       >
         <input
           id="user-photo-input"
           type="file"
           ref={fileInputRef}
-          className="sr-only" // NOT 'hidden'
           accept="image/*"
           onClick={(e) => {
-            // allow re-selecting the same file
             e.currentTarget.value = "";
           }}
           onChange={(e) => {
             const file = e.target.files?.[0];
             if (file) {
-              // fresh state for a new upload
-              setGeneratedResults([]);
-              setPreviewImage("");
-              setPreviewImageId(null);
-              setCurrentIdx(0);
               setIsLoading(false);
+              setError("");
               handleFile(file);
             }
           }}
         />
         {bodyContent}
       </Modal>
+
+      <style jsx>{`
+        .ai-minimized {
+          position: fixed;
+          right: 16px;
+          bottom: 16px;
+          padding: 10px 14px;
+          border-radius: 999px;
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+          background: white;
+          border: 1px solid #e5e7eb;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          cursor: pointer;
+          z-index: 9999;
+        }
+        .ai-dot-success {
+          width: 8px;
+          height: 8px;
+          border-radius: 999px;
+          background: #10b981;
+          display: inline-block;
+        }
+      `}</style>
     </>
   );
 }
