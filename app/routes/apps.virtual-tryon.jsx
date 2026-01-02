@@ -7,10 +7,15 @@ import {
 } from "@remix-run/node";
 import axios from "axios";
 import crypto from "crypto";
-import { authenticate } from "../shopify.server";
+import { authenticate, unauthenticated } from "../shopify.server";
 import prisma from "../db.server";
 import { uploadBase64ImageHelper } from "../../lib/helpers";
 import { GoogleAuth } from "google-auth-library";
+import {
+  buildUsageIdempotencyKey,
+  createUsageCharge,
+  getActiveUsageSubscription,
+} from "../usage-billing.server";
 
 // ====== ENV ======
 const {
@@ -239,6 +244,9 @@ async function processSessionInBackground({
   dressUrl,
   category, // optional
   requestId,
+  usedCredits = true,
+  usageBilling,
+  billingSession,
 }) {
   logCtx(`[VTO ${requestId}] BG start`, {
     sessionId,
@@ -262,11 +270,7 @@ async function processSessionInBackground({
     if (!ALLOWED.has(modelType) || !ALLOWED.has(dressType)) {
       // mark FAILED + refund
       logCtx(`[VTO ${requestId}] unsupported mime`, { modelType, dressType });
-      await prisma.$transaction([
-        prisma.store.update({
-          where: { id: store.id },
-          data: { credits: { increment: CREDIT_COST } },
-        }),
+      const txOps = [
         prisma.tryOnResult.create({
           data: {
             storeId: store.id,
@@ -275,11 +279,22 @@ async function processSessionInBackground({
             status: "FAILED",
             errorMsg: "Unsupported image type. Use PNG/JPEG/WEBP.",
             fileUrl: null,
-            refunded: true,
+            refunded: usedCredits,
             tryOnSessionId: sessionId,
           },
         }),
-      ]);
+      ];
+
+      if (usedCredits) {
+        txOps.unshift(
+          prisma.store.update({
+            where: { id: store.id },
+            data: { credits: { increment: CREDIT_COST } },
+          }),
+        );
+      }
+
+      await prisma.$transaction(txOps);
       return;
     }
 
@@ -310,6 +325,21 @@ async function processSessionInBackground({
       throw err;
     }
 
+    if (usageBilling) {
+      try {
+        await createUsageCharge({
+          session: billingSession,
+          usageLineItemId: usageBilling.usageLineItemId,
+          idempotencyKey: buildUsageIdempotencyKey(store.shop),
+        });
+      } catch (err) {
+        logErr(`[VTO ${requestId}] usage charge failed`, err, {
+          shop: store.shop,
+        });
+        throw new Error("Unable to record usage charge for try-on");
+      }
+    }
+
     // 4) persist success
     await prisma.tryOnResult.create({
       data: {
@@ -333,11 +363,7 @@ async function processSessionInBackground({
     // refund + failed row
     logErr(`[VTO ${requestId}] BG error`, err, { sessionId });
     try {
-      await prisma.$transaction([
-        prisma.store.update({
-          where: { id: store.id },
-          data: { credits: { increment: CREDIT_COST } },
-        }),
+      const txOps = [
         prisma.tryOnResult.create({
           data: {
             storeId: store.id,
@@ -346,11 +372,22 @@ async function processSessionInBackground({
             status: "FAILED",
             errorMsg: String(err?.message || err),
             fileUrl: null,
-            refunded: true,
+            refunded: usedCredits,
             tryOnSessionId: sessionId,
           },
         }),
-      ]);
+      ];
+
+      if (usedCredits) {
+        txOps.unshift(
+          prisma.store.update({
+            where: { id: store.id },
+            data: { credits: { increment: CREDIT_COST } },
+          }),
+        );
+      }
+
+      await prisma.$transaction(txOps);
       logCtx(`[VTO ${requestId}] BG refund recorded`, { sessionId });
     } catch (txErr) {
       logErr(`[VTO ${requestId}] BG refund txn failed`, txErr, { sessionId });
@@ -499,8 +536,13 @@ export async function action({ request }) {
         return json({ error: "Missing fields" }, { status: 400 });
       }
 
-      // 1) reserve credits
-      const store = await prisma.store
+      // 1) reserve credits or prepare usage billing fallback
+      let store = null;
+      let usedCredits = false;
+      let usageBilling = null;
+      let billingSession = null;
+
+      const reservedStore = await prisma.store
         .update({
           where: { shop, credits: { gte: CREDIT_COST } },
           data: { credits: { decrement: CREDIT_COST } },
@@ -510,8 +552,45 @@ export async function action({ request }) {
           return null;
         });
 
-      if (!store)
-        return json({ error: "Insufficient credits" }, { status: 402 });
+      if (reservedStore) {
+        store = reservedStore;
+        usedCredits = true;
+      } else {
+        try {
+          const adminContext = await unauthenticated.admin(shop);
+          billingSession = adminContext.session;
+
+          const usageContext = await getActiveUsageSubscription({
+            session: billingSession,
+          });
+
+          if (!usageContext.subscription) {
+            return json({ error: "Insufficient credits" }, { status: 402 });
+          }
+
+          if (!usageContext.usageLineItemId) {
+            return json(
+              {
+                error:
+                  "Active subscription missing usage billing configuration.",
+              },
+              { status: 402 },
+            );
+          }
+
+          usageBilling = usageContext;
+          store = await prisma.store.findUnique({ where: { shop } });
+
+          if (!store) {
+            return json({ error: "Store not found" }, { status: 404 });
+          }
+        } catch (err) {
+          logErr(`[VTO ${requestId}] usage billing lookup failed`, err, {
+            shop,
+          });
+          return json({ error: "Insufficient credits" }, { status: 402 });
+        }
+      }
 
       // 2) Normalize inputs to URLs (upload files immediately)
       let modelUrl;
@@ -546,13 +625,18 @@ export async function action({ request }) {
       } catch (err) {
         logErr(`[VTO ${requestId}] input upload failed`, err);
         // refund immediately if upload fails
-        try {
-          await prisma.store.update({
-            where: { id: store.id },
-            data: { credits: { increment: CREDIT_COST } },
-          });
-        } catch (txErr) {
-          logErr(`[VTO ${requestId}] refund after upload fail failed`, txErr);
+        if (usedCredits) {
+          try {
+            await prisma.store.update({
+              where: { id: store.id },
+              data: { credits: { increment: CREDIT_COST } },
+            });
+          } catch (txErr) {
+            logErr(
+              `[VTO ${requestId}] refund after upload fail failed`,
+              txErr,
+            );
+          }
         }
         return json({ error: "Failed to process inputs" }, { status: 500 });
       }
@@ -584,6 +668,9 @@ export async function action({ request }) {
           dressUrl,
           category: String(category),
           requestId,
+          usedCredits,
+          usageBilling,
+          billingSession,
         }).catch((err) => logErr(`[VTO ${requestId}] BG top-level fail`, err)),
       );
 
