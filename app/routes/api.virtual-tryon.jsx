@@ -7,15 +7,12 @@ import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import axios from "axios";
 // import { cors } from "remix-utils";
-import { hasUsageBilling } from "../models/usage-billing.server";
 
 const API_KEY = process.env.SELLER_PIC_AUTH_KEY;
 const UPLOAD_URL = process.env.SELLER_PIC_REQ_UPLOAD_URL;
 const TRYON_URL = "https://api.sellerpic.ai/v1/api/generate/tryOnApparel";
 const CHECK_URL = "https://api.sellerpic.ai/v1/api/generate";
 const CREDIT_COST = 4;
-const BILLING_MODE_CREDITS = "credits";
-const BILLING_MODE_USAGE = "usage";
 const UPLOAD_MAX = 10_000_000; // 10 MB per file
 const POLL_INTERVAL = 6000; // ms between polls
 const MAX_ATTEMPTS = 40; // give up after this many polls
@@ -151,8 +148,7 @@ export const action = async ({ request }) => {
   }
 
   // 💳 Conditionally deduct credits in one step
-  let billingMode = BILLING_MODE_CREDITS;
-  let store = await prisma.store
+  const store = await prisma.store
     .update({
       where: { shop, credits: { gte: CREDIT_COST } },
       data: { credits: { decrement: CREDIT_COST } },
@@ -160,19 +156,13 @@ export const action = async ({ request }) => {
     .catch(() => null);
 
   if (!store) {
-    billingMode = BILLING_MODE_USAGE;
-    store = await prisma.store.findUnique({ where: { shop } });
-    const usageOk = await hasUsageBilling(shop);
-
-    if (!store || !usageOk) {
-      return json(
-        { error: "Insufficient credits" },
-        {
-          status: 402,
-          headers: CORS,
-        },
-      );
-    }
+    return json(
+      { error: "Insufficient credits" },
+      {
+        status: 402,
+        headers: CORS,
+      },
+    );
   }
 
   try {
@@ -267,12 +257,10 @@ export const action = async ({ request }) => {
     console.error("Error in virtual-tryon:", err);
 
     // 💸 Refund credits on any failure
-    if (billingMode === BILLING_MODE_CREDITS) {
-      await prisma.store.update({
-        where: { shop },
-        data: { credits: { increment: CREDIT_COST } },
-      });
-    }
+    await prisma.store.update({
+      where: { shop },
+      data: { credits: { increment: CREDIT_COST } },
+    });
 
     return json(
       { error: err.message || "Unknown error" },
