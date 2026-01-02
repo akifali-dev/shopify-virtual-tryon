@@ -2,6 +2,18 @@ import { BillingInterval } from "@shopify/shopify-app-remix/server";
 
 /** 1 try-on = 4 credits (for any legacy conversion needs) */
 export const TRYON_TO_CREDITS = 1;
+export const TRYON_USAGE_PRICE = 0.1;
+export const TRYON_USAGE_TERMS =
+  "Billed at $0.10 per extra successful try-on after included credits.";
+export const TRYON_USAGE_CAPPED_AMOUNT = 200;
+export const TRYON_USAGE_CURRENCY = "USD";
+
+const buildUsageLineItem = () => ({
+  amount: TRYON_USAGE_CAPPED_AMOUNT,
+  currencyCode: TRYON_USAGE_CURRENCY,
+  interval: BillingInterval.Usage,
+  terms: TRYON_USAGE_TERMS,
+});
 
 /** Plan keys */
 export const BASIC = "BASIC";
@@ -25,9 +37,20 @@ export const PLANS = {
       "Button styling",
       "Email support",
       "Usage statistics",
+      TRYON_USAGE_TERMS,
     ],
     color: "#E3F2FD",
     priceText: "$32/mo",
+    lineItems: [
+      {
+        amount: 19,
+        currencyCode: "USD",
+        interval: BillingInterval.Every30Days,
+      },
+      buildUsageLineItem(),
+    ],
+    usagePrice: TRYON_USAGE_PRICE,
+    usageTerms: TRYON_USAGE_TERMS,
   },
 
   [GROWTH]: {
@@ -43,9 +66,20 @@ export const PLANS = {
       "Button styling",
       "Email support",
       "Usage statistics",
+      TRYON_USAGE_TERMS,
     ],
     color: "#E8F5E9",
     priceText: "$75/mo",
+    lineItems: [
+      {
+        amount: 36,
+        currencyCode: "USD",
+        interval: BillingInterval.Every30Days,
+      },
+      buildUsageLineItem(),
+    ],
+    usagePrice: TRYON_USAGE_PRICE,
+    usageTerms: TRYON_USAGE_TERMS,
   },
 
   [ADVANCED]: {
@@ -61,9 +95,20 @@ export const PLANS = {
       "Button styling",
       "Email support",
       "Usage statistics",
+      TRYON_USAGE_TERMS,
     ],
     color: "#FFF3E0",
     priceText: "$130/mo",
+    lineItems: [
+      {
+        amount: 59,
+        currencyCode: "USD",
+        interval: BillingInterval.Every30Days,
+      },
+      buildUsageLineItem(),
+    ],
+    usagePrice: TRYON_USAGE_PRICE,
+    usageTerms: TRYON_USAGE_TERMS,
   },
 
   [PRO]: {
@@ -79,9 +124,20 @@ export const PLANS = {
       "Button styling",
       "Email support",
       "Usage statistics",
+      TRYON_USAGE_TERMS,
     ],
     color: "#F3E5F5",
     priceText: "$240/mo",
+    lineItems: [
+      {
+        amount: 113,
+        currencyCode: "USD",
+        interval: BillingInterval.Every30Days,
+      },
+      buildUsageLineItem(),
+    ],
+    usagePrice: TRYON_USAGE_PRICE,
+    usageTerms: TRYON_USAGE_TERMS,
   },
 
   [BUSINESS]: {
@@ -97,9 +153,20 @@ export const PLANS = {
       "Button styling",
       "Email support",
       "Usage statistics",
+      TRYON_USAGE_TERMS,
     ],
     color: "#E0F7FA",
     priceText: "$480/mo",
+    lineItems: [
+      {
+        amount: 226,
+        currencyCode: "USD",
+        interval: BillingInterval.Every30Days,
+      },
+      buildUsageLineItem(),
+    ],
+    usagePrice: TRYON_USAGE_PRICE,
+    usageTerms: TRYON_USAGE_TERMS,
   },
 
   [ENTERPRISE]: {
@@ -115,9 +182,20 @@ export const PLANS = {
       "Button styling",
       "Email support",
       "Usage statistics",
+      TRYON_USAGE_TERMS,
     ],
     color: "#FBE9E7",
     priceText: "$960/mo",
+    lineItems: [
+      {
+        amount: 450,
+        currencyCode: "USD",
+        interval: BillingInterval.Every30Days,
+      },
+      buildUsageLineItem(),
+    ],
+    usagePrice: TRYON_USAGE_PRICE,
+    usageTerms: TRYON_USAGE_TERMS,
   },
 };
 
