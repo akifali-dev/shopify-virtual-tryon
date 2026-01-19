@@ -11,10 +11,14 @@ import {
   Divider,
   ProgressBar,
   Tag,
+  Banner,
 } from "@shopify/polaris";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { PLANS } from "../plans";
+
+const FREE_TRIAL_DAYS = 7;
+const TRIAL_DAILY_CREDITS = 20;
 
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
@@ -28,7 +32,26 @@ export const loader = async ({ request }) => {
     orderBy: { updatedAt: "desc" },
   });
 
-  return json({ store, subscription });
+  let todayUsage = 0;
+  if (store?.id) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    todayUsage = await prisma.tryOnResult.count({
+      where: {
+        storeId: store.id,
+        status: "SUCCESS",
+        createdAt: {
+          gte: today,
+          lt: tomorrow,
+        },
+      },
+    });
+  }
+
+  return json({ store, subscription, todayUsage });
 };
 
 function getRenewalDate(updatedAt, interval) {
@@ -64,40 +87,84 @@ function getCycleDays(updatedAt, interval) {
   return { daysUsed, daysTotal, percent };
 }
 
+function getTrialInfo(subscription) {
+  if (!subscription?.trialStartedAt) {
+    return { isActive: false, daysUsed: 0, daysLeft: 0, percent: 0 };
+  }
+
+  const startDate = new Date(subscription.trialStartedAt);
+  if (Number.isNaN(startDate.getTime())) {
+    return { isActive: false, daysUsed: 0, daysLeft: 0, percent: 0 };
+  }
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  startDate.setHours(0, 0, 0, 0);
+
+  const daysUsed = Math.max(
+    0,
+    Math.floor(
+      (today.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24),
+    ),
+  );
+
+  const daysLeft = Math.max(0, FREE_TRIAL_DAYS - daysUsed);
+  const isActive = daysUsed < FREE_TRIAL_DAYS;
+  const percent = FREE_TRIAL_DAYS
+    ? Math.min(100, Math.round((daysUsed / FREE_TRIAL_DAYS) * 100))
+    : 0;
+
+  return { isActive, daysUsed, daysLeft, percent };
+}
+
 export default function StatsPage() {
-  const { store, subscription } = useLoaderData();
+  const { store, subscription, todayUsage } = useLoaderData();
 
   const creditsRemainingLive = store?.credits ?? 0;
 
-  const isFree = !subscription; // <— no active subscription
+  const hasSubscription = Boolean(subscription);
   const planKey = subscription?.planKey;
   const planFromConfig = planKey ? PLANS?.[planKey] : undefined;
+  const trialInfo = getTrialInfo(subscription);
+  const isTrial = hasSubscription && trialInfo.isActive;
+  const trialCreditsRemaining = Math.max(
+    0,
+    TRIAL_DAILY_CREDITS - todayUsage,
+  );
 
   // Allocation:
   // - Paid plan: subscription.quota (fallback to plan config)
-  // - Free plan: show wallet balance (one-time free credits) as allocation
-  const allocationCredits = isFree
-    ? creditsRemainingLive
-    : (subscription?.quota ?? planFromConfig?.quota ?? 0);
+  // - Trial: daily trial credits
+  const allocationCredits = isTrial
+    ? TRIAL_DAILY_CREDITS
+    : hasSubscription
+      ? (subscription?.quota ?? planFromConfig?.quota ?? 0)
+      : 0;
 
   // Usage (within allocation)
-  const planCreditsRemaining = Math.min(
-    creditsRemainingLive,
-    allocationCredits,
-  );
-  const creditsUsed = Math.max(allocationCredits - planCreditsRemaining, 0);
+  const planCreditsRemaining = isTrial
+    ? trialCreditsRemaining
+    : hasSubscription
+      ? Math.min(creditsRemainingLive, allocationCredits)
+      : 0;
+  const creditsUsed = isTrial
+    ? Math.min(TRIAL_DAILY_CREDITS, todayUsage)
+    : Math.max(allocationCredits - planCreditsRemaining, 0);
   const usagePercent = allocationCredits
     ? Math.min(100, Math.round((creditsUsed / allocationCredits) * 100))
     : 0;
 
-  const surplusCredits = Math.max(0, creditsRemainingLive - allocationCredits);
+  const surplusCredits =
+    hasSubscription && !isTrial
+      ? Math.max(0, creditsRemainingLive - allocationCredits)
+      : 0;
 
   // Labels
-  const planName = isFree
-    ? "Free"
-    : planFromConfig?.name || subscription?.planKey || "Plan";
+  const planName = hasSubscription
+    ? planFromConfig?.name || subscription?.planKey || "Plan"
+    : "No active plan";
 
-  const renewal = !isFree
+  const renewal = hasSubscription && !isTrial
     ? getRenewalDate(subscription.updatedAt, subscription.interval)
     : null;
 
@@ -105,7 +172,7 @@ export default function StatsPage() {
     daysUsed,
     daysTotal,
     percent: cyclePercent,
-  } = !isFree
+  } = hasSubscription && !isTrial
     ? getCycleDays(subscription.updatedAt, subscription.interval)
     : { daysUsed: 0, daysTotal: 0, percent: 0 };
 
@@ -130,6 +197,19 @@ export default function StatsPage() {
   return (
     <Page title="Usage (Try-ons)" subtitle="Track your try-ons and progress">
       <BlockStack gap="400">
+        {isTrial && trialCreditsRemaining === 0 && (
+          <Banner
+            tone="critical"
+            title="Daily trial limit reached"
+          >
+            <p>
+              You’ve used all {TRIAL_DAILY_CREDITS} trial credits for today.
+              You can keep using the app tomorrow, or upgrade for unlimited
+              access right away.
+            </p>
+          </Banner>
+        )}
+
         {/* Top summary row */}
         <InlineGrid columns={{ xs: 1, md: 3 }} gap="400">
           <Card>
@@ -139,20 +219,29 @@ export default function StatsPage() {
                   Plan
                 </Text>
                 <Tag>
-                  {isFree ? "FREE" : (subscription?.status ?? "ACTIVE")}
+                  {hasSubscription
+                    ? (subscription?.status ?? "ACTIVE")
+                    : "INACTIVE"}
                 </Tag>
               </InlineStack>
 
               <Text variant="headingLg">{planName}</Text>
 
-              {!isFree && renewal && (
+              {isTrial && (
+                <Text tone="subdued">
+                  Trial ends in {trialInfo.daysLeft} days. Your subscription
+                  starts immediately after the trial ends.
+                </Text>
+              )}
+              {!isTrial && hasSubscription && renewal && (
                 <Text tone="subdued">
                   Next renewal: {renewal.toDateString()}
                 </Text>
               )}
-              {isFree && (
+              {!hasSubscription && (
                 <Text tone="subdued">
-                  You’re on the Free plan with one-time trial credits.
+                  Subscribe to start your 7-day free trial with 20 credits per
+                  day.
                 </Text>
               )}
 
@@ -160,10 +249,15 @@ export default function StatsPage() {
 
               <InlineStack align="space-between">
                 <Text tone="subdued">
-                  {isFree ? "Available (one-time)" : "Allocation (per cycle)"}
+                  {isTrial
+                    ? "Daily trial credits"
+                    : hasSubscription
+                      ? "Allocation (per cycle)"
+                      : "Allocation"}
                 </Text>
                 <Text as="p" variant="headingLg">
-                  {allocationCredits.toLocaleString()} Try-ons
+                  {allocationCredits.toLocaleString()}{" "}
+                  {isTrial ? "Credits" : "Try-ons"}
                 </Text>
               </InlineStack>
             </BlockStack>
@@ -172,7 +266,7 @@ export default function StatsPage() {
           <Card>
             <BlockStack gap="200">
               <Text as="h3" variant="headingMd">
-                Usage {isFree ? "" : "this cycle"}
+                Usage {isTrial ? "today" : hasSubscription ? "this cycle" : ""}
               </Text>
 
               <InlineGrid columns={{ xs: 1, sm: 3 }}>
@@ -184,13 +278,17 @@ export default function StatsPage() {
                 </BlockStack>
                 <BlockStack gap="050">
                   <Text tone="subdued">
-                    {isFree ? "Remaining" : "Remaining (in plan)"}
+                    {isTrial
+                      ? "Remaining today"
+                      : hasSubscription
+                        ? "Remaining (in plan)"
+                        : "Remaining"}
                   </Text>
                   <Text variant="headingLg">
                     {planCreditsRemaining.toLocaleString()}
                   </Text>
                 </BlockStack>
-                {!isFree && (
+                {hasSubscription && !isTrial && (
                   <BlockStack gap="050">
                     <Text tone="subdued">Surplus (wallet)</Text>
                     <Text variant="headingLg">
@@ -204,7 +302,11 @@ export default function StatsPage() {
 
               <BlockStack gap="150">
                 <Text tone="subdued">
-                  {isFree ? "Trial credits used" : "Allocation used"}
+                  {isTrial
+                    ? "Trial credits used today"
+                    : hasSubscription
+                      ? "Allocation used"
+                      : "Allocation used"}
                 </Text>
                 <ProgressBar
                   progress={usagePercent}
@@ -225,13 +327,41 @@ export default function StatsPage() {
           <Card>
             <BlockStack gap="200">
               <Text as="h3" variant="headingMd">
-                {isFree ? "Upgrade for monthly allocation" : "Cycle progress"}
+                {isTrial
+                  ? "Trial progress"
+                  : hasSubscription
+                    ? "Cycle progress"
+                    : "Get started"}
               </Text>
 
-              {isFree ? (
+              {isTrial ? (
+                <>
+                  <BlockStack gap="150">
+                    <ProgressBar
+                      progress={trialInfo.percent}
+                      ariaLabelledby="trial-bar"
+                    />
+                    <InlineStack align="space-between">
+                      <Text id="trial-bar" tone="subdued">
+                        {trialInfo.daysUsed} days elapsed
+                      </Text>
+                      <Text tone="subdued">
+                        {trialInfo.daysLeft} days left
+                      </Text>
+                    </InlineStack>
+                  </BlockStack>
+
+                  <Divider />
+
+                  <Text tone="subdued">
+                    Trial usage is capped at {TRIAL_DAILY_CREDITS} credits per
+                    day. Your full plan starts immediately after the trial.
+                  </Text>
+                </>
+              ) : !hasSubscription ? (
                 <Text tone="subdued">
-                  Upgrade to a paid plan to get a monthly try-on allocation and
-                  renewals.
+                  Choose a subscription to unlock the 7-day free trial and
+                  start generating try-ons.
                 </Text>
               ) : (
                 <>
@@ -272,16 +402,32 @@ export default function StatsPage() {
         <InlineGrid columns={{ xs: 1, md: 2 }} gap="400">
           <Card title="Details">
             <BlockStack gap="200">
-              {isFree ? (
+              {isTrial ? (
                 <>
                   <Text tone="subdued">
-                    You currently have{" "}
-                    <strong>{allocationCredits.toLocaleString()}</strong> free
-                    try-ons available.
+                    You’re currently in a free trial with{" "}
+                    <strong>{TRIAL_DAILY_CREDITS}</strong> credits per day.
                   </Text>
                   <Text tone="subdued">
-                    Free credits are one-time. Upgrade to get a recurring
-                    monthly allocation and advanced features.
+                    Today you’ve used{" "}
+                    <strong>{creditsUsed.toLocaleString()}</strong> credits,{" "}
+                    leaving{" "}
+                    <strong>{planCreditsRemaining.toLocaleString()}</strong>{" "}
+                    for the rest of the day.
+                  </Text>
+                  <Text tone="subdued">
+                    Trial ends in {trialInfo.daysLeft} days, and your paid
+                    subscription starts immediately after.
+                  </Text>
+                </>
+              ) : !hasSubscription ? (
+                <>
+                  <Text tone="subdued">
+                    No active subscription is on file for this store yet.
+                  </Text>
+                  <Text tone="subdued">
+                    Subscribe to start your 7-day free trial with 20 credits
+                    per day.
                   </Text>
                 </>
               ) : (
@@ -307,9 +453,9 @@ export default function StatsPage() {
             </BlockStack>
           </Card>
 
-          <Card title={isFree ? "Why upgrade?" : "Forecast"}>
+          <Card title={isTrial || !hasSubscription ? "Why subscribe?" : "Forecast"}>
             <BlockStack gap="200">
-              {isFree ? (
+              {isTrial || !hasSubscription ? (
                 <Text tone="subdued">
                   Paid plans unlock a monthly try-on pool, auto-renewals, and
                   priority support — perfect for steady growth.

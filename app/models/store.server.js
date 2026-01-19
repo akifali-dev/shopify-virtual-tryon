@@ -9,7 +9,7 @@ export async function upsertStore(shop, ownerEmail) {
   return prisma.store.upsert({
     where: { shop },
     update: { ownerEmail },
-    create: { shop, ownerEmail, credits: 15 },
+    create: { shop, ownerEmail },
   });
 }
 
@@ -32,6 +32,10 @@ export async function upsertSubscription(shop, subscription) {
     const tryonsPerMonth = plan.quota ?? 0;
     const creditsPerMonth = tryonsPerMonth * TRYON_TO_CREDITS;
 
+    const trialStartedAt =
+      existing?.trialStartedAt ??
+      (subscription?.createdAt ? new Date(subscription.createdAt) : new Date());
+
     await tx.subscription.upsert({
       where: { subscriptionId: subscription?.id },
       update: {
@@ -45,6 +49,7 @@ export async function upsertSubscription(shop, subscription) {
           subscription?.lineItems?.[0]?.plan?.pricingDetails?.interval ??
           "",
         storeId: store?.id,
+        trialStartedAt,
       },
       create: {
         shop,
@@ -62,6 +67,7 @@ export async function upsertSubscription(shop, subscription) {
           "",
         storeId: store?.id,
         lastCreditedAt: new Date(),
+        trialStartedAt,
       },
     });
 

@@ -17,6 +17,7 @@ import {
   Tag,
   Text,
   Tooltip,
+  Banner,
 } from "@shopify/polaris";
 import { BillingInterval } from "@shopify/shopify-app-remix/server";
 
@@ -133,6 +134,16 @@ export default function PricingPage() {
           </Layout.Section>
         ) : (
           <>
+            <Layout.Section>
+              <Banner tone="info" title="7-day free trial">
+                <p>
+                  Subscribe to any plan to start your free trial with 20
+                  credits per day. You can cancel anytime during the trial, and
+                  your paid subscription starts immediately after the 7 days
+                  end.
+                </p>
+              </Banner>
+            </Layout.Section>
             <Layout.Section>
               <InlineGrid gap="400" columns={{ xs: 1, sm: 2, lg: 3 }}>
                 {ALL_PLANS?.map((plan) => {

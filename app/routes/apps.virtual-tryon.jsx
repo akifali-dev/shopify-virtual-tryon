@@ -29,6 +29,7 @@ const {
 const UPLOAD_MAX = 10_000_000;
 const CREDIT_COST = 1;
 const FREE_TRIAL_DAYS = 7;
+const TRIAL_DAILY_CREDITS = 20;
 
 const VTO_MODEL_ID = "virtual-try-on-preview-08-04";
 const VERTEX_ENDPOINT = `https://${VERTEX_AI_LOCATION}-aiplatform.googleapis.com/v1/projects/${VERTEX_AI_PROJECT_ID}/locations/${VERTEX_AI_LOCATION}/publishers/google/models/${VTO_MODEL_ID}:predict`;
@@ -168,36 +169,7 @@ async function getVertexAccessToken(requestId) {
   }
 }
 
-async function checkSubscription(storeId) {
-  try {
-    const subscription = await prisma.subscription.findFirst({
-      where: { storeId },
-    });
-
-    if (subscription) return subscription; // no subscription = free tier
-
-    return null;
-  } catch (err) {
-    logErr(`[VTO ${requestId}] isOnFreeTier check failed`, err);
-    return false;
-  }
-}
-
-async function isOnFreeTier(store, requestId) {
-  const isSubscribed = await checkSubscription(store.id);
-
-  if (isSubscribed) {
-    logCtx(`[VTO ${requestId}] isOnFreeTier: false`, { storeId: store.id });
-    return false;
-  } else {
-    logCtx(`[VTO ${requestId}] isOnFreeTier: true`, { storeId: store.id });
-    return true;
-  }
-}
-
-async function checkDailyLimit(storeId, requestId) {
-  const DAILY_LIMIT = 2;
-
+async function checkDailyLimit(storeId, requestId, dailyLimit) {
   try {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -216,77 +188,44 @@ async function checkDailyLimit(storeId, requestId) {
     });
 
     logCtx(`[VTO ${requestId}] daily limit check`, { storeId, count });
-    return count < DAILY_LIMIT;
+    return count < dailyLimit;
   } catch (err) {
     logErr(`[VTO ${requestId}] checkDailyLimit failed`, err, { storeId });
     return false;
   }
 }
 
-async function canProcessTryOn(store, requestId) {
-  try {
-    const isFree = await isOnFreeTier(store, requestId);
-
-    if (isFree) {
-      const underLimit = await checkDailyLimit(store.id, requestId);
-
-      if (!underLimit) {
-        logCtx(`[VTO ${requestId}] canProcessTryOn: false (daily limit)`, {
-          storeId: store.id,
-        });
-        return {
-          success: false,
-          error: "daily limit exceeded",
-        };
-      }
-
-      // check trial period
-      const today = new Date();
-      const installedAt = store.installedAt || new Date();
-      today.setHours(0, 0, 0, 0);
-      const installedAtDate = new Date(installedAt);
-      installedAtDate.setHours(0, 0, 0, 0);
-
-      const daysSinceInstall = Math.floor(
-        (today.getTime() - installedAtDate.getTime()) / (1000 * 60 * 60 * 24),
-      );
-
-      if (daysSinceInstall < FREE_TRIAL_DAYS) {
-        logCtx(`[VTO ${requestId}] canProcessTryOn: true`, {
-          storeId: store.id,
-        });
-
-        return {
-          success: true,
-          daysLeft: FREE_TRIAL_DAYS - daysSinceInstall,
-        };
-      } else {
-        logCtx(`[VTO ${requestId}] canProcessTryOn: false (trial expired)`, {
-          storeId: store.id,
-        });
-
-        return {
-          success: false,
-          error: "trial period expired",
-        };
-      }
-    } else {
-      logCtx(`[VTO ${requestId}] canProcessTryOn: true (subscribed)`, {
-        storeId: store.id,
-      });
-      return {
-        success: true,
-      };
-    }
-  } catch (error) {
-    logErr(`[VTO ${requestId}] canProcessTryOn check failed`, error, {
-      storeId: store.id,
-    });
-    return {
-      success: false,
-      error: "internal server error",
-    };
+function getTrialInfo(subscription) {
+  if (!subscription) {
+    return { isActive: false, daysLeft: 0, daysUsed: 0, daysTotal: 0 };
   }
+
+  const trialDays = subscription.trialDays ?? FREE_TRIAL_DAYS;
+  if (!trialDays) {
+    return { isActive: false, daysLeft: 0, daysUsed: 0, daysTotal: 0 };
+  }
+
+  const createdAt = subscription.createdAt
+    ? new Date(subscription.createdAt)
+    : null;
+  if (!createdAt || Number.isNaN(createdAt.getTime())) {
+    return { isActive: false, daysLeft: 0, daysUsed: 0, daysTotal: trialDays };
+  }
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  createdAt.setHours(0, 0, 0, 0);
+
+  const daysUsed = Math.max(
+    0,
+    Math.floor(
+      (today.getTime() - createdAt.getTime()) / (1000 * 60 * 60 * 24),
+    ),
+  );
+  const daysLeft = Math.max(0, trialDays - daysUsed);
+  const isActive = daysUsed < trialDays;
+
+  return { isActive, daysLeft, daysUsed, daysTotal: trialDays };
 }
 
 // ====== VERTEX CALL ======
@@ -713,6 +652,8 @@ export async function action({ request }) {
       }
 
       const isSubscribed = Boolean(activeSub);
+      const trialInfo = isSubscribed ? getTrialInfo(activeSub) : null;
+      const isTrialActive = Boolean(trialInfo?.isActive);
       const isPro =
         String(activeSub?.name || "")
           .trim()
@@ -724,18 +665,26 @@ export async function action({ request }) {
       // =========================
       // Gatekeeping rules
       // =========================
+      if (!isSubscribed) {
+        return json(
+          { error: "Active subscription required" },
+          { status: 402 },
+        );
+      }
 
-      // IMPORTANT toggle:
-      // If true => credits allow unlimited even without subscription (bypass trial/daily limit)
-      // If false => free-trial/daily limit applies to non-subscribed even if they have credits
-      const CREDITS_BYPASS_FREE_TRIAL = false;
+      if (isTrialActive) {
+        const underLimit = await checkDailyLimit(
+          storeRow.id,
+          requestId,
+          TRIAL_DAILY_CREDITS,
+        );
 
-      // ---- If not subscribed, enforce free-tier rules (daily limit + trial days) ----
-      // Only skip this if you explicitly want credits to bypass it
-      if (!isSubscribed && !CREDITS_BYPASS_FREE_TRIAL) {
-        const canProcess = await canProcessTryOn(storeRow, requestId);
-        if (!canProcess.success) {
-          return json({ error: canProcess.error }, { status: 402 });
+        if (!underLimit) {
+          logCtx(`[VTO ${requestId}] trial daily limit reached`, {
+            storeId: storeRow.id,
+            dailyLimit: TRIAL_DAILY_CREDITS,
+          });
+          return json({ error: "daily limit exceeded" }, { status: 402 });
         }
       }
 
@@ -747,60 +696,47 @@ export async function action({ request }) {
       let usageBilling = null;
       let billingSession = adminContext?.session || null;
 
-      // ---- Try reserve internal credits first ----
-      const reservedStore = await prisma.store
-        .update({
-          where: { shop, credits: { gte: CREDIT_COST } },
-          data: { credits: { decrement: CREDIT_COST } },
-        })
-        .catch((err) => {
-          logErr(`[VTO ${requestId}] credit reserve failed`, err, { shop });
-          return null;
-        });
+      if (!isTrialActive) {
+        // ---- Try reserve internal credits first ----
+        const reservedStore = await prisma.store
+          .update({
+            where: { shop, credits: { gte: CREDIT_COST } },
+            data: { credits: { decrement: CREDIT_COST } },
+          })
+          .catch((err) => {
+            logErr(`[VTO ${requestId}] credit reserve failed`, err, { shop });
+            return null;
+          });
 
-      if (reservedStore) {
-        // credits path
-        billingStore = reservedStore;
-        usedCredits = true;
+        if (reservedStore) {
+          // credits path
+          billingStore = reservedStore;
+          usedCredits = true;
+        } else {
+          // subscription path (usage billing)
+          if (!isPro) {
+            return json({ error: "Insufficient credits" }, { status: 402 });
+          }
 
-        // If you want to apply free-tier gate ONLY when there are no credits,
-        // keep as-is.
-        // If you want to enforce daily limit even WITH credits on non-subscribed,
-        // set CREDITS_BYPASS_FREE_TRIAL=false and the gate above already handled it.
-      } else if (isSubscribed) {
-        // subscription path (usage billing)
-        if (!isPro) {
-          return json({ error: "Insufficient credits" }, { status: 402 });
+          if (!usageLineItemId) {
+            return json(
+              {
+                error:
+                  "Active subscription missing usage billing configuration.",
+              },
+              { status: 402 },
+            );
+          }
+
+          usageBilling = {
+            subscription: activeSub,
+            usageLineItemId,
+            admin: adminContext.admin,
+          };
+
+          billingStore = storeRow;
+          usedCredits = false;
         }
-
-        if (!usageLineItemId) {
-          return json(
-            {
-              error: "Active subscription missing usage billing configuration.",
-            },
-            { status: 402 },
-          );
-        }
-
-        usageBilling = {
-          subscription: activeSub,
-          usageLineItemId,
-          admin: adminContext.admin,
-        };
-
-        billingStore = storeRow;
-        usedCredits = false;
-      } else {
-        // not subscribed and no credits:
-        // enforce free-tier rules here as fallback (in case CREDITS_BYPASS_FREE_TRIAL=true)
-        const canProcess = await canProcessTryOn(storeRow, requestId);
-        if (!canProcess.success) {
-          return json({ error: canProcess.error }, { status: 402 });
-        }
-
-        billingStore = storeRow;
-        usedCredits = false;
-        usageBilling = null;
       }
 
       // ---- Normalize inputs to URLs ----
