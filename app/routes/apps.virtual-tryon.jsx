@@ -16,7 +16,7 @@ import {
   createUsageCharge,
   getActiveUsageSubscription,
 } from "../usage-billing.server";
-import { OVERAGE_TRYON_TERMS, PRO } from "../plans";
+import { getTrialDailyCredits, OVERAGE_TRYON_TERMS, PRO } from "../plans";
 import sharp from "sharp";
 
 // ====== ENV ======
@@ -29,7 +29,6 @@ const {
 const UPLOAD_MAX = 10_000_000;
 const CREDIT_COST = 1;
 const FREE_TRIAL_DAYS = 7;
-const TRIAL_DAILY_CREDITS = 20;
 
 const VTO_MODEL_ID = "virtual-try-on-preview-08-04";
 const VERTEX_ENDPOINT = `https://${VERTEX_AI_LOCATION}-aiplatform.googleapis.com/v1/projects/${VERTEX_AI_PROJECT_ID}/locations/${VERTEX_AI_LOCATION}/publishers/google/models/${VTO_MODEL_ID}:predict`;
@@ -671,6 +670,7 @@ export async function action({ request }) {
       const isSubscribed = Boolean(activeSub);
       const trialInfo = isSubscribed ? getTrialInfo(activeSub) : null;
       const isTrialActive = Boolean(trialInfo?.isActive);
+      const trialDailyCredits = getTrialDailyCredits(activeSub?.name);
       const isPro =
         String(activeSub?.name || "")
           .trim()
@@ -693,13 +693,13 @@ export async function action({ request }) {
         const underLimit = await checkDailyLimit(
           storeRow.id,
           requestId,
-          TRIAL_DAILY_CREDITS,
+          trialDailyCredits,
         );
 
         if (!underLimit) {
           logCtx(`[VTO ${requestId}] trial daily limit reached`, {
             storeId: storeRow.id,
-            dailyLimit: TRIAL_DAILY_CREDITS,
+            dailyLimit: trialDailyCredits,
           });
           return json({ error: "daily limit exceeded" }, { status: 402 });
         }

@@ -15,10 +15,9 @@ import {
 } from "@shopify/polaris";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
-import { PLANS } from "../plans";
+import { getTrialDailyCredits, PLANS } from "../plans";
 
 const FREE_TRIAL_DAYS = 7;
-const TRIAL_DAILY_CREDITS = 20;
 
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
@@ -127,16 +126,17 @@ export default function StatsPage() {
   const planFromConfig = planKey ? PLANS?.[planKey] : undefined;
   const trialInfo = getTrialInfo(subscription);
   const isTrial = hasSubscription && trialInfo.isActive;
+  const trialDailyCredits = getTrialDailyCredits(planKey);
   const trialCreditsRemaining = Math.max(
     0,
-    TRIAL_DAILY_CREDITS - todayUsage,
+    trialDailyCredits - todayUsage,
   );
 
   // Allocation:
   // - Paid plan: subscription.quota (fallback to plan config)
   // - Trial: daily trial credits
   const allocationCredits = isTrial
-    ? TRIAL_DAILY_CREDITS
+    ? trialDailyCredits
     : hasSubscription
       ? (subscription?.quota ?? planFromConfig?.quota ?? 0)
       : 0;
@@ -148,7 +148,7 @@ export default function StatsPage() {
       ? Math.min(creditsRemainingLive, allocationCredits)
       : 0;
   const creditsUsed = isTrial
-    ? Math.min(TRIAL_DAILY_CREDITS, todayUsage)
+    ? Math.min(trialDailyCredits, todayUsage)
     : Math.max(allocationCredits - planCreditsRemaining, 0);
   const usagePercent = allocationCredits
     ? Math.min(100, Math.round((creditsUsed / allocationCredits) * 100))
@@ -203,7 +203,7 @@ export default function StatsPage() {
             title="Daily trial limit reached"
           >
             <p>
-              You’ve used all {TRIAL_DAILY_CREDITS} trial credits for today.
+              You’ve used all {trialDailyCredits} trial credits for today.
               You can keep using the app tomorrow, or upgrade for unlimited
               access right away.
             </p>
@@ -240,8 +240,8 @@ export default function StatsPage() {
               )}
               {!hasSubscription && (
                 <Text tone="subdued">
-                  Subscribe to start your 7-day free trial with 20 credits per
-                  day.
+                  Subscribe to start your 7-day free trial with 10 credits per
+                  day on Basic or 20 credits per day on other plans.
                 </Text>
               )}
 
@@ -354,7 +354,7 @@ export default function StatsPage() {
                   <Divider />
 
                   <Text tone="subdued">
-                    Trial usage is capped at {TRIAL_DAILY_CREDITS} credits per
+                    Trial usage is capped at {trialDailyCredits} credits per
                     day. Your full plan starts immediately after the trial.
                   </Text>
                 </>
@@ -406,7 +406,7 @@ export default function StatsPage() {
                 <>
                   <Text tone="subdued">
                     You’re currently in a free trial with{" "}
-                    <strong>{TRIAL_DAILY_CREDITS}</strong> credits per day.
+                    <strong>{trialDailyCredits}</strong> credits per day.
                   </Text>
                   <Text tone="subdued">
                     Today you’ve used{" "}
@@ -426,8 +426,8 @@ export default function StatsPage() {
                     No active subscription is on file for this store yet.
                   </Text>
                   <Text tone="subdued">
-                    Subscribe to start your 7-day free trial with 20 credits
-                    per day.
+                    Subscribe to start your 7-day free trial with 10 credits
+                    per day on Basic or 20 credits per day on other plans.
                   </Text>
                 </>
               ) : (

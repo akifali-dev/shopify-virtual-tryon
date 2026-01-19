@@ -1,5 +1,5 @@
 import { authenticate } from "../shopify.server";
-import { ALL_PLANS, PLAN_KEYS } from "../plans"; // uses your updated plans
+import { ALL_PLANS, getTrialDailyCredits, PLAN_KEYS } from "../plans"; // uses your updated plans
 import { upsertStore, upsertSubscription } from "../models/store.server";
 import { json, redirect } from "@remix-run/node";
 import { Form, useLoaderData } from "@remix-run/react";
@@ -139,10 +139,10 @@ export default function PricingPage() {
             <Layout.Section>
               <Banner tone="info" title="7-day free trial">
                 <p>
-                  Subscribe to any plan to start your free trial with 20
-                  credits per day. You can cancel anytime during the trial, and
-                  your paid subscription starts immediately after the 7 days
-                  end.
+                  Subscribe to any plan to start your free trial with 10
+                  credits per day on Basic or 20 credits per day on other
+                  plans. You can cancel anytime during the trial, and your paid
+                  subscription starts immediately after the 7 days end.
                 </p>
                 <p>
                   Need full access right away? Choose “Start paid plan now” to
@@ -197,7 +197,10 @@ export default function PricingPage() {
                         </Text>
                         <InlineStack gap="200" blockAlign="center">
                           <Tag tone="info">7-day trial</Tag>
-                          <Text tone="subdued">20 credits/day during trial</Text>
+                          <Text tone="subdued">
+                            {getTrialDailyCredits(plan?.key)} credits/day during
+                            trial
+                          </Text>
                         </InlineStack>
 
                         <Divider />

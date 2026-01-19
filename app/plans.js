@@ -8,6 +8,8 @@ export const OVERAGE_TRYON_TERMS =
   "Additional try-ons billed at $0.12 each after your plan allocation.";
 const OVERAGE_TRYON_CAP = 500; // USD capped amount for usage-based billing
 export const TRIAL_DAYS = 7;
+export const BASIC_TRIAL_DAILY_CREDITS = 10;
+export const DEFAULT_TRIAL_DAILY_CREDITS = 20;
 
 /** Plan keys */
 export const BASIC = "BASIC";
@@ -168,6 +170,33 @@ export const PLANS = {
 // };
 
 export const PLAN_ALIASES = {};
+
+export function getPlanKeyFromName(planKeyOrName) {
+  if (!planKeyOrName) return "";
+  const raw = String(planKeyOrName).trim();
+  const upper = raw.toUpperCase();
+
+  if (PLANS[raw]) return raw;
+  if (PLANS[upper]) return upper;
+
+  const alias = PLAN_ALIASES[raw] || PLAN_ALIASES[upper];
+  if (alias) return alias;
+
+  const entry = Object.entries(PLANS).find(([, plan]) => {
+    return String(plan?.name || "").trim().toUpperCase() === upper;
+  });
+
+  return entry ? entry[0] : "";
+}
+
+export function getTrialDailyCredits(planKeyOrName) {
+  const resolvedKey = getPlanKeyFromName(planKeyOrName);
+  if (resolvedKey === BASIC) {
+    return BASIC_TRIAL_DAILY_CREDITS;
+  }
+
+  return DEFAULT_TRIAL_DAILY_CREDITS;
+}
 
 export const PLAN_KEYS = Array.from(
   new Set([...Object.keys(PLANS), ...Object.keys(PLAN_ALIASES)]),
