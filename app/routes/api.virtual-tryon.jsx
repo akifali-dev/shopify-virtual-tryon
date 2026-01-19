@@ -148,10 +148,35 @@ export const action = async ({ request }) => {
   }
 
   // 💳 Conditionally deduct credits in one step
-  const store = await prisma.store
-    .update({
-      where: { shop, credits: { gte: CREDIT_COST } },
-      data: { credits: { decrement: CREDIT_COST } },
+  let usedSubscriptionId = null;
+  const store = await prisma
+    .$transaction(async (tx) => {
+      const updatedStore = await tx.store
+        .update({
+          where: { shop, credits: { gte: CREDIT_COST } },
+          data: { credits: { decrement: CREDIT_COST } },
+        })
+        .catch(() => null);
+
+      if (!updatedStore) return null;
+
+      const subscription = await tx.subscription.findFirst({
+        where: { shop, status: "ACTIVE" },
+        orderBy: { updatedAt: "desc" },
+      });
+
+      if (subscription?.credits > 0) {
+        const decrement = Math.min(CREDIT_COST, subscription.credits);
+        if (decrement > 0) {
+          await tx.subscription.update({
+            where: { id: subscription.id },
+            data: { credits: { decrement } },
+          });
+        }
+      }
+
+      usedSubscriptionId = subscription?.id ?? null;
+      return updatedStore;
     })
     .catch(() => null);
 
@@ -257,9 +282,18 @@ export const action = async ({ request }) => {
     console.error("Error in virtual-tryon:", err);
 
     // 💸 Refund credits on any failure
-    await prisma.store.update({
-      where: { shop },
-      data: { credits: { increment: CREDIT_COST } },
+    await prisma.$transaction(async (tx) => {
+      await tx.store.update({
+        where: { shop },
+        data: { credits: { increment: CREDIT_COST } },
+      });
+
+      if (usedSubscriptionId) {
+        await tx.subscription.update({
+          where: { id: usedSubscriptionId },
+          data: { credits: { increment: CREDIT_COST } },
+        });
+      }
     });
 
     return json(
