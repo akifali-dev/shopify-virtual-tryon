@@ -60,6 +60,7 @@ model Subscription {
   status         String // ACTIVE, CANCELLED
   interval       String // EVERY_30_DAYS, ANNUAL
   lastCreditedAt DateTime?
+  trialStartedAt DateTime?
   updatedAt      DateTime  @updatedAt
   Store          Store?    @relation(fields: [storeId], references: [id])
   storeId        String?   @db.ObjectId

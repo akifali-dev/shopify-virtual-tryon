@@ -7,6 +7,7 @@ export const OVERAGE_TRYON_CURRENCY = "USD";
 export const OVERAGE_TRYON_TERMS =
   "Additional try-ons billed at $0.12 each after your plan allocation.";
 const OVERAGE_TRYON_CAP = 500; // USD capped amount for usage-based billing
+export const TRIAL_DAYS = 7;
 
 /** Plan keys */
 export const BASIC = "BASIC";
@@ -31,6 +32,7 @@ export const PLANS = {
     amount: 19.99, // USD
     currencyCode: "USD",
     interval: BillingInterval.Every30Days,
+    trialDays: TRIAL_DAYS,
     features: [
       "100 customer try-ons per month",
       "Increase buyer confidence",
@@ -49,6 +51,7 @@ export const PLANS = {
     amount: 49.99, // USD
     currencyCode: "USD",
     interval: BillingInterval.Every30Days,
+    trialDays: TRIAL_DAYS,
     features: [
       "500 customer try-ons per month",
       "Increase buyer confidence",
@@ -67,6 +70,7 @@ export const PLANS = {
     amount: 299.99, // USD
     currencyCode: "USD",
     interval: BillingInterval.Every30Days,
+    trialDays: TRIAL_DAYS,
     features: [
       "2000 customer try-ons per month",
       "Increase buyer confidence",
@@ -85,6 +89,7 @@ export const PLANS = {
     amount: 299.99, // USD
     currencyCode: "USD",
     interval: BillingInterval.Every30Days,
+    trialDays: TRIAL_DAYS,
     features: [
       "Extra try-ons at $0.12 per try-on",
       "2000 customer try-ons per month",

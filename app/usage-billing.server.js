@@ -15,6 +15,8 @@ const ACTIVE_SUB_QUERY = `
         id
         name
         status
+        createdAt
+        trialDays
         lineItems {
           id
           plan {
