@@ -33,7 +33,7 @@ export async function upsertSubscription(shop, subscription) {
     const creditsPerMonth = tryonsPerMonth * TRYON_TO_CREDITS;
 
     await tx.subscription.upsert({
-      where: { subscriptionId: subscription.id },
+      where: { subscriptionId: subscription?.id },
       update: {
         shop,
         planKey,
@@ -48,7 +48,7 @@ export async function upsertSubscription(shop, subscription) {
       },
       create: {
         shop,
-        subscriptionId: subscription.id,
+        subscriptionId: subscription?.id,
         planKey,
         // quota: plan.quota ?? 0,
         // credits: plan.quota ?? 0,

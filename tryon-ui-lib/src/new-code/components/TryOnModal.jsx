@@ -63,6 +63,7 @@ export function TryOnModal({
   const RESULT_KEY = "tryon:lastResult"; // persisted final result
 
   const requirements = ["Full body", "Good lighting", "Just you"];
+
   const loadingSentences = [
     "Taking the piece of clothing…",
     "Putting clothing on person…",
@@ -71,10 +72,88 @@ export function TryOnModal({
     "Creating final look…",
   ];
 
+  // ========================================== Compress Image ==========================================
+
+  async function loadImageFromFile(file) {
+    // Prefer createImageBitmap (fast), but iOS Safari can be inconsistent
+    if ("createImageBitmap" in window) {
+      try {
+        return await createImageBitmap(file);
+      } catch {
+        // fall through
+      }
+    }
+
+    // Fallback: HTMLImageElement
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await new Promise((resolve, reject) => {
+        const el = new Image();
+        el.onload = () => resolve(el);
+        el.onerror = reject;
+        el.src = url;
+      });
+      return img;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  function computeTargetSize(w, h, maxSide) {
+    const scale = Math.min(1, maxSide / Math.max(w, h));
+    return {
+      tw: Math.round(w * scale),
+      th: Math.round(h * scale),
+    };
+  }
+
+  async function compressImageFile(
+    file,
+    { maxSide = 2048, quality = 0.82 } = {},
+  ) {
+    const img = await loadImageFromFile(file);
+    const w = img.width;
+    const h = img.height;
+
+    const { tw, th } = computeTargetSize(w, h, maxSide);
+
+    const canvas = document.createElement("canvas");
+    canvas.width = tw;
+    canvas.height = th;
+
+    const ctx = canvas.getContext("2d", { alpha: false });
+    ctx.drawImage(img, 0, 0, tw, th);
+
+    // Safari sometimes ignores quality, but still reduces a lot after resize
+    const blob = await new Promise((resolve) => {
+      canvas.toBlob((b) => resolve(b), "image/jpeg", quality);
+    });
+
+    if (!blob) throw new Error("Image compression failed");
+
+    // Return as File so your FormData path stays the same
+    const compressedFile = new File([blob], `tryon-${Date.now()}.jpg`, {
+      type: "image/jpeg",
+      lastModified: Date.now(),
+    });
+
+    return {
+      file: compressedFile,
+      original: { w, h, size: file.size },
+      compressed: { w: tw, h: th, size: compressedFile.size },
+    };
+  }
+
+  const buildTryOnUrl = (params) => {
+    const qs = new URLSearchParams(params);
+    return `${proxyUrl}?${qs.toString()}`;
+  };
+
   const pollConfirm = async (sessionId) => {
     try {
       const res = await fetch(
-        `${proxyUrl}?type=confirm&sessionId=${sessionId}`,
+        // `${proxyUrl}?type=confirm&sessionId=${sessionId}`,
+        buildTryOnUrl({ type: "confirm", sessionId }),
         { method: "POST" },
       );
       const data = await res.json();
@@ -204,7 +283,17 @@ export function TryOnModal({
     }
     setError("");
     try {
-      await handleFileUpload(file);
+      // Downscale huge-dimension images even if file size is small
+      const {
+        file: compressed,
+        original,
+        compressed: comp,
+      } = await compressImageFile(file, { maxSide: 2048, quality: 0.82 });
+
+      console.log("Try-on image compressed:", { original, comp });
+      // await handleFileUpload(file);
+
+      await handleFileUpload(compressed);
     } catch {
       setError("Failed to upload file");
     }
@@ -273,10 +362,13 @@ export function TryOnModal({
     if (!taskId) return;
     try {
       setIsLoading(true);
-      const res = await fetch(`${proxyUrl}?type=result&taskId=${taskId}`, {
-        method: "POST",
-        redirect: "manual",
-      });
+      const res = await fetch(
+        // `${proxyUrl}?type=result&taskId=${taskId}`,
+        buildTryOnUrl({ type: "result", taskId }),
+        {
+          method: "POST",
+        },
+      );
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data.error || "Failed to fetch previous result");
@@ -325,7 +417,8 @@ export function TryOnModal({
 
       try {
         const res = await fetch(
-          `${proxyUrl}?type=result&sessionId=${sessionId}`,
+          // `${proxyUrl}?type=result&sessionId=${sessionId}`,
+          buildTryOnUrl({ type: "result", sessionId }),
           { method: "POST" },
         );
         if (res.ok) {
@@ -366,12 +459,28 @@ export function TryOnModal({
     formData.append("category", selectedGarmentType);
 
     try {
-      const res = await fetch(`${proxyUrl}?type=createSession`, {
-        method: "POST",
-        redirect: "manual",
-        body: formData,
-      });
-      const data = await res.json();
+      const res = await fetch(
+        // `${proxyUrl}?type=createSession`,
+        buildTryOnUrl({ type: "createSession" }),
+        {
+          method: "POST",
+          body: formData,
+        },
+      );
+
+      // const data = await res.json();
+
+      // Defensive parsing
+      const text = await res.text(); // Read as text first
+
+      let data;
+      try {
+        data = JSON.parse(text); // Try parsing manually
+      } catch (e) {
+        // If parsing fails, Safari would have thrown "the string did not match..."
+        throw new Error(`Server returned non-JSON response`);
+      }
+
       if (!res.ok) throw new Error(data.error || "Failed to start session");
 
       const { sessionId } = data;
@@ -670,8 +779,11 @@ export function TryOnModal({
           <p className="ai-initial__smallNote">
             Only upload a photo of yourself. Generative AI is experimental and
             can make mistakes. See our{" "}
-            <a href="https://www.aiframe.app/privacy-policy/virtual-fitting-room" id="ai-link">
-              usage policy
+            <a
+              href="https://www.aiframe.app/privacy-policy/virtual-fitting-room"
+              id="ai-link"
+            >
+              privacy policy
             </a>{" "}
             for details.
           </p>

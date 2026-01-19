@@ -7,10 +7,17 @@ import {
 } from "@remix-run/node";
 import axios from "axios";
 import crypto from "crypto";
-import { authenticate } from "../shopify.server";
+import { authenticate, unauthenticated } from "../shopify.server";
 import prisma from "../db.server";
 import { uploadBase64ImageHelper } from "../../lib/helpers";
 import { GoogleAuth } from "google-auth-library";
+import {
+  buildUsageIdempotencyKey,
+  createUsageCharge,
+  getActiveUsageSubscription,
+} from "../usage-billing.server";
+import { OVERAGE_TRYON_TERMS, PRO } from "../plans";
+import sharp from "sharp";
 
 // ====== ENV ======
 const {
@@ -21,6 +28,7 @@ const {
 
 const UPLOAD_MAX = 10_000_000;
 const CREDIT_COST = 1;
+const FREE_TRIAL_DAYS = 7;
 
 const VTO_MODEL_ID = "virtual-try-on-preview-08-04";
 const VERTEX_ENDPOINT = `https://${VERTEX_AI_LOCATION}-aiplatform.googleapis.com/v1/projects/${VERTEX_AI_PROJECT_ID}/locations/${VERTEX_AI_LOCATION}/publishers/google/models/${VTO_MODEL_ID}:predict`;
@@ -160,6 +168,127 @@ async function getVertexAccessToken(requestId) {
   }
 }
 
+async function checkSubscription(storeId) {
+  try {
+    const subscription = await prisma.subscription.findFirst({
+      where: { storeId },
+    });
+
+    if (subscription) return subscription; // no subscription = free tier
+
+    return null;
+  } catch (err) {
+    logErr(`[VTO ${requestId}] isOnFreeTier check failed`, err);
+    return false;
+  }
+}
+
+async function isOnFreeTier(store, requestId) {
+  const isSubscribed = await checkSubscription(store.id);
+
+  if (isSubscribed) {
+    logCtx(`[VTO ${requestId}] isOnFreeTier: false`, { storeId: store.id });
+    return false;
+  } else {
+    logCtx(`[VTO ${requestId}] isOnFreeTier: true`, { storeId: store.id });
+    return true;
+  }
+}
+
+async function checkDailyLimit(storeId, requestId) {
+  const DAILY_LIMIT = 2;
+
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    const count = await prisma.tryOnResult.count({
+      where: {
+        storeId,
+        status: "SUCCESS",
+        createdAt: {
+          gte: today,
+          lt: tomorrow,
+        },
+      },
+    });
+
+    logCtx(`[VTO ${requestId}] daily limit check`, { storeId, count });
+    return count < DAILY_LIMIT;
+  } catch (err) {
+    logErr(`[VTO ${requestId}] checkDailyLimit failed`, err, { storeId });
+    return false;
+  }
+}
+
+async function canProcessTryOn(store, requestId) {
+  try {
+    const isFree = await isOnFreeTier(store, requestId);
+
+    if (isFree) {
+      const underLimit = await checkDailyLimit(store.id, requestId);
+
+      if (!underLimit) {
+        logCtx(`[VTO ${requestId}] canProcessTryOn: false (daily limit)`, {
+          storeId: store.id,
+        });
+        return {
+          success: false,
+          error: "daily limit exceeded",
+        };
+      }
+
+      // check trial period
+      const today = new Date();
+      const installedAt = store.installedAt || new Date();
+      today.setHours(0, 0, 0, 0);
+      const installedAtDate = new Date(installedAt);
+      installedAtDate.setHours(0, 0, 0, 0);
+
+      const daysSinceInstall = Math.floor(
+        (today.getTime() - installedAtDate.getTime()) / (1000 * 60 * 60 * 24),
+      );
+
+      if (daysSinceInstall < FREE_TRIAL_DAYS) {
+        logCtx(`[VTO ${requestId}] canProcessTryOn: true`, {
+          storeId: store.id,
+        });
+
+        return {
+          success: true,
+          daysLeft: FREE_TRIAL_DAYS - daysSinceInstall,
+        };
+      } else {
+        logCtx(`[VTO ${requestId}] canProcessTryOn: false (trial expired)`, {
+          storeId: store.id,
+        });
+
+        return {
+          success: false,
+          error: "trial period expired",
+        };
+      }
+    } else {
+      logCtx(`[VTO ${requestId}] canProcessTryOn: true (subscribed)`, {
+        storeId: store.id,
+      });
+      return {
+        success: true,
+      };
+    }
+  } catch (error) {
+    logErr(`[VTO ${requestId}] canProcessTryOn check failed`, error, {
+      storeId: store.id,
+    });
+    return {
+      success: false,
+      error: "internal server error",
+    };
+  }
+}
+
 // ====== VERTEX CALL ======
 /**
  * Calls Vertex AI Virtual Try-On
@@ -181,7 +310,14 @@ async function runTryOnOnceWithBuffers({ modelBuf, dressBuf, requestId }) {
         productImages: [{ image: { bytesBase64Encoded: productB64 } }],
       },
     ],
-    parameters: { sampleCount: 1 },
+    parameters: {
+      sampleCount: 1,
+      baseSteps: 15,
+      outputOptions: {
+        mimeType: "image/jpeg",
+        compressionQuality: 45,
+      },
+    },
   };
 
   logCtx(`[VTO ${requestId}] predict request`, {
@@ -201,6 +337,8 @@ async function runTryOnOnceWithBuffers({ modelBuf, dressBuf, requestId }) {
       maxContentLength: Infinity,
       maxBodyLength: Infinity,
     });
+
+    console.log("Server Response : ", resp);
 
     const preds = resp?.data?.predictions || [];
     logCtx(`[VTO ${requestId}] predict response`, {
@@ -239,6 +377,9 @@ async function processSessionInBackground({
   dressUrl,
   category, // optional
   requestId,
+  usedCredits = true,
+  usageBilling,
+  billingSession,
 }) {
   logCtx(`[VTO ${requestId}] BG start`, {
     sessionId,
@@ -249,10 +390,39 @@ async function processSessionInBackground({
 
   try {
     // 1) download both URLs to buffers
-    const [modelBuf, dressBuf] = await Promise.all([
+    let [modelBuf, dressBuf] = await Promise.all([
       fetchAsBuffer(modelUrl, requestId),
       fetchAsBuffer(dressUrl, requestId),
     ]);
+
+    // const MAX_SIDE = 1536;
+    const MAX_SIDE = 2048;
+
+    const resizeIfNeeded = async (buf, outName) => {
+      // sharp can throw if format unsupported/corrupt
+      const meta = await sharp(buf).metadata();
+      const w = meta.width || 0;
+      const h = meta.height || 0;
+
+      if (Math.max(w, h) <= MAX_SIDE) return buf;
+
+      const resized = await sharp(buf)
+        .rotate() // IMPORTANT: respects EXIF orientation from iPhone photos
+        .resize({ width: MAX_SIDE, height: MAX_SIDE, fit: "inside" })
+        .jpeg({ quality: 82 })
+        .toBuffer();
+
+      resized.name = outName; // keep your mime inference working
+      return resized;
+    };
+
+    // Resize large inputs (and normalize to jpeg)
+    modelBuf = await resizeIfNeeded(modelBuf, "model.jpg");
+    dressBuf = await resizeIfNeeded(dressBuf, "dress.jpg");
+
+    // Ensure name exists even when not resized (fetchAsBuffer sets it, but just in case)
+    modelBuf.name = modelBuf.name || "model.jpg";
+    dressBuf.name = dressBuf.name || "dress.jpg";
 
     const modelType = inferMimeFromName(modelBuf.name);
     const dressType = inferMimeFromName(dressBuf.name);
@@ -262,11 +432,7 @@ async function processSessionInBackground({
     if (!ALLOWED.has(modelType) || !ALLOWED.has(dressType)) {
       // mark FAILED + refund
       logCtx(`[VTO ${requestId}] unsupported mime`, { modelType, dressType });
-      await prisma.$transaction([
-        prisma.store.update({
-          where: { id: store.id },
-          data: { credits: { increment: CREDIT_COST } },
-        }),
+      const txOps = [
         prisma.tryOnResult.create({
           data: {
             storeId: store.id,
@@ -275,11 +441,22 @@ async function processSessionInBackground({
             status: "FAILED",
             errorMsg: "Unsupported image type. Use PNG/JPEG/WEBP.",
             fileUrl: null,
-            refunded: true,
+            refunded: usedCredits,
             tryOnSessionId: sessionId,
           },
         }),
-      ]);
+      ];
+
+      if (usedCredits) {
+        txOps.unshift(
+          prisma.store.update({
+            where: { id: store.id },
+            data: { credits: { increment: CREDIT_COST } },
+          }),
+        );
+      }
+
+      await prisma.$transaction(txOps);
       return;
     }
 
@@ -310,6 +487,22 @@ async function processSessionInBackground({
       throw err;
     }
 
+    if (usageBilling) {
+      try {
+        await createUsageCharge({
+          admin: usageBilling.admin, // pass admin
+          usageLineItemId: usageBilling.usageLineItemId,
+          description: OVERAGE_TRYON_TERMS,
+          idempotencyKey: buildUsageIdempotencyKey(store.shop),
+        });
+      } catch (err) {
+        logErr(`[VTO ${requestId}] usage charge failed`, err, {
+          shop: store.shop,
+        });
+        throw new Error("Unable to record usage charge for try-on");
+      }
+    }
+
     // 4) persist success
     await prisma.tryOnResult.create({
       data: {
@@ -333,11 +526,7 @@ async function processSessionInBackground({
     // refund + failed row
     logErr(`[VTO ${requestId}] BG error`, err, { sessionId });
     try {
-      await prisma.$transaction([
-        prisma.store.update({
-          where: { id: store.id },
-          data: { credits: { increment: CREDIT_COST } },
-        }),
+      const txOps = [
         prisma.tryOnResult.create({
           data: {
             storeId: store.id,
@@ -346,11 +535,22 @@ async function processSessionInBackground({
             status: "FAILED",
             errorMsg: String(err?.message || err),
             fileUrl: null,
-            refunded: true,
+            refunded: usedCredits,
             tryOnSessionId: sessionId,
           },
         }),
-      ]);
+      ];
+
+      if (usedCredits) {
+        txOps.unshift(
+          prisma.store.update({
+            where: { id: store.id },
+            data: { credits: { increment: CREDIT_COST } },
+          }),
+        );
+      }
+
+      await prisma.$transaction(txOps);
       logCtx(`[VTO ${requestId}] BG refund recorded`, { sessionId });
     } catch (txErr) {
       logErr(`[VTO ${requestId}] BG refund txn failed`, txErr, { sessionId });
@@ -458,9 +658,6 @@ export async function action({ request }) {
 
     // ---- createSession ----
     if (type === "createSession") {
-      console.log("Type Create session.....")
-
-      // Quick env assert per request (useful on serverless cold starts)
       if (!VERTEX_AI_PROJECT_ID) {
         logCtx(`[VTO ${requestId}] missing VERTEX_AI_PROJECT_ID`, {});
         return json(
@@ -472,6 +669,7 @@ export async function action({ request }) {
       const uploadHandler = unstable_createMemoryUploadHandler({
         maxPartSize: UPLOAD_MAX,
       });
+
       let formData;
       try {
         formData = await unstable_parseMultipartFormData(
@@ -483,24 +681,74 @@ export async function action({ request }) {
         return json({ error: "Invalid multipart form" }, { status: 400 });
       }
 
-      const dressInput = formData.get("dressImage"); // File or URL
-      const modelInput = formData.get("modelImage"); // File or URL
-      const category = formData.get("category"); // optional for Vertex
-
-      logCtx(`[VTO ${requestId}] createSession inputs`, {
-        hasDress: !!dressInput,
-        hasModel: !!modelInput,
-        category,
-        dressType: dressInput?.constructor?.name,
-        modelType: modelInput?.constructor?.name,
-      });
+      const dressInput = formData.get("dressImage");
+      const modelInput = formData.get("modelImage");
+      const category = formData.get("category");
 
       if (!dressInput || !modelInput || !category) {
         return json({ error: "Missing fields" }, { status: 400 });
       }
 
-      // 1) reserve credits
-      const store = await prisma.store
+      // ---- Load store once ----
+      const storeRow = await prisma.store.findUnique({ where: { shop } });
+      if (!storeRow) return json({ error: "Store not found" }, { status: 404 });
+
+      // ---- Single Shopify subscription lookup ----
+      let adminContext = null;
+      let activeSub = null;
+      let usageLineItemId = null;
+
+      try {
+        adminContext = await unauthenticated.admin(shop);
+        const usageContext = await getActiveUsageSubscription({
+          admin: adminContext.admin,
+        });
+        activeSub = usageContext?.subscription || null;
+        usageLineItemId = usageContext?.usageLineItemId || null;
+      } catch (err) {
+        // treat as no subscription
+        adminContext = null;
+        activeSub = null;
+        usageLineItemId = null;
+      }
+
+      const isSubscribed = Boolean(activeSub);
+      const isPro =
+        String(activeSub?.name || "")
+          .trim()
+          .toLowerCase() ===
+        String(PRO || "pro")
+          .trim()
+          .toLowerCase();
+
+      // =========================
+      // Gatekeeping rules
+      // =========================
+
+      // IMPORTANT toggle:
+      // If true => credits allow unlimited even without subscription (bypass trial/daily limit)
+      // If false => free-trial/daily limit applies to non-subscribed even if they have credits
+      const CREDITS_BYPASS_FREE_TRIAL = false;
+
+      // ---- If not subscribed, enforce free-tier rules (daily limit + trial days) ----
+      // Only skip this if you explicitly want credits to bypass it
+      if (!isSubscribed && !CREDITS_BYPASS_FREE_TRIAL) {
+        const canProcess = await canProcessTryOn(storeRow, requestId);
+        if (!canProcess.success) {
+          return json({ error: canProcess.error }, { status: 402 });
+        }
+      }
+
+      // =========================
+      // Payment path selection
+      // =========================
+      let billingStore = storeRow;
+      let usedCredits = false;
+      let usageBilling = null;
+      let billingSession = adminContext?.session || null;
+
+      // ---- Try reserve internal credits first ----
+      const reservedStore = await prisma.store
         .update({
           where: { shop, credits: { gte: CREDIT_COST } },
           data: { credits: { decrement: CREDIT_COST } },
@@ -510,10 +758,52 @@ export async function action({ request }) {
           return null;
         });
 
-      if (!store)
-        return json({ error: "Insufficient credits" }, { status: 402 });
+      if (reservedStore) {
+        // credits path
+        billingStore = reservedStore;
+        usedCredits = true;
 
-      // 2) Normalize inputs to URLs (upload files immediately)
+        // If you want to apply free-tier gate ONLY when there are no credits,
+        // keep as-is.
+        // If you want to enforce daily limit even WITH credits on non-subscribed,
+        // set CREDITS_BYPASS_FREE_TRIAL=false and the gate above already handled it.
+      } else if (isSubscribed) {
+        // subscription path (usage billing)
+        if (!isPro) {
+          return json({ error: "Insufficient credits" }, { status: 402 });
+        }
+
+        if (!usageLineItemId) {
+          return json(
+            {
+              error: "Active subscription missing usage billing configuration.",
+            },
+            { status: 402 },
+          );
+        }
+
+        usageBilling = {
+          subscription: activeSub,
+          usageLineItemId,
+          admin: adminContext.admin,
+        };
+
+        billingStore = storeRow;
+        usedCredits = false;
+      } else {
+        // not subscribed and no credits:
+        // enforce free-tier rules here as fallback (in case CREDITS_BYPASS_FREE_TRIAL=true)
+        const canProcess = await canProcessTryOn(storeRow, requestId);
+        if (!canProcess.success) {
+          return json({ error: canProcess.error }, { status: 402 });
+        }
+
+        billingStore = storeRow;
+        usedCredits = false;
+        usageBilling = null;
+      }
+
+      // ---- Normalize inputs to URLs ----
       let modelUrl;
       let dressUrl;
 
@@ -523,12 +813,7 @@ export async function action({ request }) {
         } else {
           const ab = Buffer.from(await modelInput.arrayBuffer());
           const mime = inferMimeFromName(modelInput.name);
-          const uploaded = await uploadBase64ImageHelper(
-            ab,
-            mime,
-            "tryon-inputs",
-          );
-          modelUrl = uploaded;
+          modelUrl = await uploadBase64ImageHelper(ab, mime, "tryon-inputs");
         }
 
         if (typeof dressInput === "string") {
@@ -536,31 +821,30 @@ export async function action({ request }) {
         } else {
           const ab = Buffer.from(await dressInput.arrayBuffer());
           const mime = inferMimeFromName(dressInput.name);
-          const uploaded = await uploadBase64ImageHelper(
-            ab,
-            mime,
-            "tryon-inputs",
-          );
-          dressUrl = uploaded;
+          dressUrl = await uploadBase64ImageHelper(ab, mime, "tryon-inputs");
         }
       } catch (err) {
         logErr(`[VTO ${requestId}] input upload failed`, err);
-        // refund immediately if upload fails
-        try {
-          await prisma.store.update({
-            where: { id: store.id },
-            data: { credits: { increment: CREDIT_COST } },
-          });
-        } catch (txErr) {
-          logErr(`[VTO ${requestId}] refund after upload fail failed`, txErr);
+
+        // refund only if we decremented credits
+        if (usedCredits && billingStore?.id) {
+          try {
+            await prisma.store.update({
+              where: { id: billingStore.id },
+              data: { credits: { increment: CREDIT_COST } },
+            });
+          } catch (txErr) {
+            logErr(`[VTO ${requestId}] refund after upload fail failed`, txErr);
+          }
         }
+
         return json({ error: "Failed to process inputs" }, { status: 500 });
       }
 
-      // 3) persist a TryOnSession
+      // ---- Persist session immediately (so daily limit cannot be bypassed) ----
       const sessionRow = await prisma.tryOnSession.create({
         data: {
-          storeId: store.id,
+          storeId: billingStore.id,
           category: String(category),
           modelUrl,
           dressUrl,
@@ -571,23 +855,26 @@ export async function action({ request }) {
 
       logCtx(`[VTO ${requestId}] session created`, {
         sessionId: sessionRow.id,
-        modelUrl,
-        dressUrl,
+        usedCredits,
+        willChargeUsage: !!usageBilling,
+        subName: usageBilling?.subscription?.name,
       });
 
-      // 4) start background job (detached)
+      // ---- BG job ----
       setImmediate(() =>
         processSessionInBackground({
-          store,
+          store: billingStore,
           sessionId: sessionRow.id,
           modelUrl,
           dressUrl,
           category: String(category),
           requestId,
+          usedCredits,
+          usageBilling,
+          billingSession,
         }).catch((err) => logErr(`[VTO ${requestId}] BG top-level fail`, err)),
       );
 
-      // 5) return sessionId immediately
       return json({ sessionId: sessionRow.id }, { status: 200 });
     }
 
