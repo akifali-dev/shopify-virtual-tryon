@@ -45,6 +45,7 @@ export const action = async ({ request }) => {
 
   if (intent === "subscribe") {
     const planKey = form.get("planKey");
+    const skipTrial = form.get("skipTrial") === "true";
 
     if (!PLAN_KEYS.includes(planKey)) {
       return json({ error: "Invalid plan selected." }, { status: 400 });
@@ -53,6 +54,7 @@ export const action = async ({ request }) => {
     const { confirmationUrl } = await billing.request({
       plan: planKey,
       isTest: false,
+      ...(skipTrial ? { trialDays: 0 } : {}),
     });
 
     // return redirect("/app/pricing");
@@ -142,6 +144,10 @@ export default function PricingPage() {
                   your paid subscription starts immediately after the 7 days
                   end.
                 </p>
+                <p>
+                  Need full access right away? Choose “Start paid plan now” to
+                  skip the trial and unlock your plan limits immediately.
+                </p>
               </Banner>
             </Layout.Section>
             <Layout.Section>
@@ -189,6 +195,10 @@ export default function PricingPage() {
                         <Text tone="subdued">
                           {plan?.quota?.toLocaleString()} try-ons / month
                         </Text>
+                        <InlineStack gap="200" blockAlign="center">
+                          <Tag tone="info">7-day trial</Tag>
+                          <Text tone="subdued">20 credits/day during trial</Text>
+                        </InlineStack>
 
                         <Divider />
 
@@ -203,26 +213,43 @@ export default function PricingPage() {
 
                         {/* Subscribe CTA */}
                         <InlineStack align="end">
-                          <Form method="post">
-                            <input
-                              type="hidden"
-                              name="intent"
-                              value="subscribe"
-                            />
-                            <input
-                              type="hidden"
-                              name="planKey"
-                              value={plan?.key}
-                            />
-                            <Button variant="primary" submit>
-                              Choose {plan?.name}
-                            </Button>
-                            {/* <Tooltip
-                              content="Each try-on uses 4 credits in legacy reports."
-                              dismissOnMouseOut
-                            >
-                            </Tooltip> */}
-                          </Form>
+                          <InlineStack gap="200">
+                            <Form method="post">
+                              <input
+                                type="hidden"
+                                name="intent"
+                                value="subscribe"
+                              />
+                              <input
+                                type="hidden"
+                                name="planKey"
+                                value={plan?.key}
+                              />
+                              <Button variant="primary" submit>
+                                Start trial
+                              </Button>
+                            </Form>
+                            <Form method="post">
+                              <input
+                                type="hidden"
+                                name="intent"
+                                value="subscribe"
+                              />
+                              <input
+                                type="hidden"
+                                name="planKey"
+                                value={plan?.key}
+                              />
+                              <input
+                                type="hidden"
+                                name="skipTrial"
+                                value="true"
+                              />
+                              <Button variant="secondary" submit>
+                                Start paid plan now
+                              </Button>
+                            </Form>
+                          </InlineStack>
                         </InlineStack>
                       </BlockStack>
                     </Card>
