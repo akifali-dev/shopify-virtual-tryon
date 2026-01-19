@@ -1,9 +1,32 @@
 import prisma from "../db.server";
-import { PLANS, PLAN_ALIASES, TRYON_TO_CREDITS } from "../plans";
+import { PLANS, PLAN_ALIASES, TRYON_TO_CREDITS, TRIAL_DAYS } from "../plans";
 
 const PLAN_NAME_TO_KEY = Object.fromEntries(
   Object.entries(PLANS).map(([key, value]) => [value.name, key]),
 );
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+function normalizeStatus(status = "") {
+  return String(status).trim().toUpperCase();
+}
+
+function isTrialActive(trialStartedAt) {
+  if (!trialStartedAt) return false;
+  const startDate = new Date(trialStartedAt);
+  if (Number.isNaN(startDate.getTime())) return false;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  startDate.setHours(0, 0, 0, 0);
+
+  const daysUsed = Math.max(
+    0,
+    Math.floor((today.getTime() - startDate.getTime()) / MS_PER_DAY),
+  );
+
+  return daysUsed < TRIAL_DAYS;
+}
 
 export async function upsertStore(shop, ownerEmail) {
   return prisma.store.upsert({
@@ -36,21 +59,36 @@ export async function upsertSubscription(shop, subscription) {
       existing?.trialStartedAt ??
       (subscription?.createdAt ? new Date(subscription.createdAt) : new Date());
 
+    const nextStatus = normalizeStatus(subscription.status);
+    const prevStatus = normalizeStatus(existing?.status);
+    const cancelling = nextStatus === "CANCELLED" && prevStatus !== "CANCELLED";
+    const trialActive = isTrialActive(trialStartedAt);
+    const creditsToRevoke =
+      cancelling && trialActive
+        ? Math.max(0, Math.min(store?.credits ?? 0, existing?.credits ?? 0))
+        : 0;
+
+    const updateData = {
+      shop,
+      planKey,
+      // quota: plan.quota ?? 0,
+      quota: tryonsPerMonth,
+      status: subscription.status,
+      interval:
+        plan.interval ??
+        subscription?.lineItems?.[0]?.plan?.pricingDetails?.interval ??
+        "",
+      storeId: store?.id,
+      trialStartedAt,
+    };
+
+    if (creditsToRevoke > 0) {
+      updateData.credits = 0;
+    }
+
     await tx.subscription.upsert({
       where: { subscriptionId: subscription?.id },
-      update: {
-        shop,
-        planKey,
-        // quota: plan.quota ?? 0,
-        quota: tryonsPerMonth,
-        status: subscription.status,
-        interval:
-          plan.interval ??
-          subscription?.lineItems?.[0]?.plan?.pricingDetails?.interval ??
-          "",
-        storeId: store?.id,
-        trialStartedAt,
-      },
+      update: updateData,
       create: {
         shop,
         subscriptionId: subscription?.id,
@@ -92,6 +130,13 @@ export async function upsertSubscription(shop, subscription) {
           data: { credits: { increment: creditDelta } },
         });
       }
+    }
+
+    if (creditsToRevoke > 0) {
+      await tx.store.update({
+        where: { shop },
+        data: { credits: { decrement: creditsToRevoke } },
+      });
     }
   });
 }

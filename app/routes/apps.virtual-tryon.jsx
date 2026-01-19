@@ -319,6 +319,7 @@ async function processSessionInBackground({
   usedCredits = true,
   usageBilling,
   billingSession,
+  usedSubscriptionId = null,
 }) {
   logCtx(`[VTO ${requestId}] BG start`, {
     sessionId,
@@ -393,6 +394,14 @@ async function processSessionInBackground({
             data: { credits: { increment: CREDIT_COST } },
           }),
         );
+        if (usedSubscriptionId) {
+          txOps.unshift(
+            prisma.subscription.update({
+              where: { id: usedSubscriptionId },
+              data: { credits: { increment: CREDIT_COST } },
+            }),
+          );
+        }
       }
 
       await prisma.$transaction(txOps);
@@ -487,6 +496,14 @@ async function processSessionInBackground({
             data: { credits: { increment: CREDIT_COST } },
           }),
         );
+        if (usedSubscriptionId) {
+          txOps.unshift(
+            prisma.subscription.update({
+              where: { id: usedSubscriptionId },
+              data: { credits: { increment: CREDIT_COST } },
+            }),
+          );
+        }
       }
 
       await prisma.$transaction(txOps);
@@ -696,12 +713,42 @@ export async function action({ request }) {
       let usageBilling = null;
       let billingSession = adminContext?.session || null;
 
+      let usedSubscriptionId = null;
       if (!isTrialActive) {
         // ---- Try reserve internal credits first ----
-        const reservedStore = await prisma.store
-          .update({
-            where: { shop, credits: { gte: CREDIT_COST } },
-            data: { credits: { decrement: CREDIT_COST } },
+        const reservedStore = await prisma
+          .$transaction(async (tx) => {
+            const updatedStore = await tx.store
+              .update({
+                where: { shop, credits: { gte: CREDIT_COST } },
+                data: { credits: { decrement: CREDIT_COST } },
+              })
+              .catch((err) => {
+                logErr(`[VTO ${requestId}] credit reserve failed`, err, {
+                  shop,
+                });
+                return null;
+              });
+
+            if (!updatedStore) return null;
+
+            const subscription = await tx.subscription.findFirst({
+              where: { shop, status: "ACTIVE" },
+              orderBy: { updatedAt: "desc" },
+            });
+
+            if (subscription?.credits > 0) {
+              const decrement = Math.min(CREDIT_COST, subscription.credits);
+              if (decrement > 0) {
+                await tx.subscription.update({
+                  where: { id: subscription.id },
+                  data: { credits: { decrement } },
+                });
+              }
+            }
+
+            usedSubscriptionId = subscription?.id ?? null;
+            return updatedStore;
           })
           .catch((err) => {
             logErr(`[VTO ${requestId}] credit reserve failed`, err, { shop });
@@ -765,9 +812,18 @@ export async function action({ request }) {
         // refund only if we decremented credits
         if (usedCredits && billingStore?.id) {
           try {
-            await prisma.store.update({
-              where: { id: billingStore.id },
-              data: { credits: { increment: CREDIT_COST } },
+            await prisma.$transaction(async (tx) => {
+              await tx.store.update({
+                where: { id: billingStore.id },
+                data: { credits: { increment: CREDIT_COST } },
+              });
+
+              if (usedSubscriptionId) {
+                await tx.subscription.update({
+                  where: { id: usedSubscriptionId },
+                  data: { credits: { increment: CREDIT_COST } },
+                });
+              }
             });
           } catch (txErr) {
             logErr(`[VTO ${requestId}] refund after upload fail failed`, txErr);
@@ -808,6 +864,7 @@ export async function action({ request }) {
           usedCredits,
           usageBilling,
           billingSession,
+          usedSubscriptionId,
         }).catch((err) => logErr(`[VTO ${requestId}] BG top-level fail`, err)),
       );
 
