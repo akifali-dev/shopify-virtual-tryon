@@ -11,8 +11,8 @@ function normalizeStatus(status = "") {
   return String(status).trim().toUpperCase();
 }
 
-function isTrialActive(trialStartedAt) {
-  if (!trialStartedAt) return false;
+function isTrialActive(trialStartedAt, trialDays) {
+  if (!trialStartedAt || !trialDays) return false;
   const startDate = new Date(trialStartedAt);
   if (Number.isNaN(startDate.getTime())) return false;
 
@@ -25,7 +25,7 @@ function isTrialActive(trialStartedAt) {
     Math.floor((today.getTime() - startDate.getTime()) / MS_PER_DAY),
   );
 
-  return daysUsed < TRIAL_DAYS;
+  return daysUsed < trialDays;
 }
 
 export async function upsertStore(shop, ownerEmail) {
@@ -55,14 +55,22 @@ export async function upsertSubscription(shop, subscription) {
     const tryonsPerMonth = plan.quota ?? 0;
     const creditsPerMonth = tryonsPerMonth * TRYON_TO_CREDITS;
 
-    const trialStartedAt =
-      existing?.trialStartedAt ??
-      (subscription?.createdAt ? new Date(subscription.createdAt) : new Date());
+    const trialDays =
+      typeof subscription?.trialDays === "number"
+        ? subscription.trialDays
+        : TRIAL_DAYS;
+    const hasTrial = trialDays > 0;
+    const trialStartedAt = hasTrial
+      ? existing?.trialStartedAt ??
+        (subscription?.createdAt
+          ? new Date(subscription.createdAt)
+          : new Date())
+      : null;
 
     const nextStatus = normalizeStatus(subscription.status);
     const prevStatus = normalizeStatus(existing?.status);
     const cancelling = nextStatus === "CANCELLED" && prevStatus !== "CANCELLED";
-    const trialActive = isTrialActive(trialStartedAt);
+    const trialActive = isTrialActive(trialStartedAt, trialDays);
     const creditsToRevoke =
       cancelling && trialActive
         ? Math.max(0, Math.min(store?.credits ?? 0, existing?.credits ?? 0))
